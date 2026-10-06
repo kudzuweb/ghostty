@@ -67,6 +67,23 @@ final class ScriptTab: NSObject {
         return window?.tabIsSelected(controller) ?? false
     }
 
+    /// Exposed as the AppleScript `tab color` property.
+    ///
+    /// Reads and writes the same color the tab context menu sets.
+    @objc(tabColor)
+    var tabColor: FourCharCode {
+        get {
+            guard NSApp.isAppleScriptEnabled else { return TerminalTabColor.none.scriptCode }
+            let terminalWindow = controller?.window as? TerminalWindow
+            return (terminalWindow?.tabColor ?? .none).scriptCode
+        }
+        set {
+            guard NSApp.isAppleScriptEnabled else { return }
+            guard let color = TerminalTabColor(scriptCode: newValue) else { return }
+            (controller?.window as? TerminalWindow)?.tabColor = color
+        }
+    }
+
     /// Exposed as the AppleScript `focused terminal` property.
     ///
     /// Uses the currently focused surface for this tab.
@@ -182,5 +199,40 @@ extension ScriptTab {
     /// lookups in `ScriptWindow` call this helper.
     static func stableID(controller: BaseTerminalController) -> String {
         "tab-\(ObjectIdentifier(controller).hexString)"
+    }
+}
+
+/// Mapping between `TerminalTabColor` and the `tab color` enumeration in
+/// `Ghostty.sdef`.
+extension TerminalTabColor {
+    init?(scriptCode: FourCharCode) {
+        switch scriptCode {
+        case "GTCn".fourCharCode: self = .none
+        case "GTCb".fourCharCode: self = .blue
+        case "GTCp".fourCharCode: self = .purple
+        case "GTCk".fourCharCode: self = .pink
+        case "GTCr".fourCharCode: self = .red
+        case "GTCo".fourCharCode: self = .orange
+        case "GTCy".fourCharCode: self = .yellow
+        case "GTCg".fourCharCode: self = .green
+        case "GTCt".fourCharCode: self = .teal
+        case "GTCa".fourCharCode: self = .graphite
+        default: return nil
+        }
+    }
+
+    var scriptCode: FourCharCode {
+        switch self {
+        case .none: "GTCn".fourCharCode
+        case .blue: "GTCb".fourCharCode
+        case .purple: "GTCp".fourCharCode
+        case .pink: "GTCk".fourCharCode
+        case .red: "GTCr".fourCharCode
+        case .orange: "GTCo".fourCharCode
+        case .yellow: "GTCy".fourCharCode
+        case .green: "GTCg".fourCharCode
+        case .teal: "GTCt".fourCharCode
+        case .graphite: "GTCa".fourCharCode
+        }
     }
 }
