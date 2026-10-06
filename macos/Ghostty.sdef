@@ -72,6 +72,12 @@
       <property name="tab color" code="GTco" type="tab color" description="The color shown on this tab.">
         <cocoa key="tabColor"/>
       </property>
+      <property name="group name" code="GTgn" type="text" description="The name of the sidebar group this tab is in, or an empty string. Setting it moves the tab into that group, beside its other tabs.">
+        <cocoa key="groupName"/>
+      </property>
+      <property name="group color" code="GTgc" type="tab color" description="The color of this tab's sidebar group. Shared by every tab in the group; ignored for a tab that is not in one.">
+        <cocoa key="groupColor"/>
+      </property>
       <property name="focused terminal" code="GTfT" type="terminal" access="r" description="The currently focused terminal surface in this tab.">
         <cocoa key="focusedTerminal"/>
       </property>

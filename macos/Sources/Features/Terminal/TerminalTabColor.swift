@@ -111,16 +111,22 @@ enum TerminalTabColor: Int, CaseIterable, Codable {
 /// Used as a custom view inside an NSMenuItem in the tab context menu.
 struct TabColorMenuView: View {
     @State private var currentSelection: TerminalTabColor
+    let title: String
     let onSelect: (TerminalTabColor) -> Void
 
-    init(selectedColor: TerminalTabColor, onSelect: @escaping (TerminalTabColor) -> Void) {
+    init(
+        selectedColor: TerminalTabColor,
+        title: String = "Tab Color",
+        onSelect: @escaping (TerminalTabColor) -> Void
+    ) {
         self._currentSelection = State(initialValue: selectedColor)
+        self.title = title
         self.onSelect = onSelect
     }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 3) {
-            Text("Tab Color")
+            Text(title)
                 .padding(.bottom, 2)
 
             ForEach(Self.paletteRows, id: \.self) { row in

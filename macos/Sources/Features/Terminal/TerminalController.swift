@@ -431,6 +431,9 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
             case "current": fallthrough
             default:
                 parent.addTabbedWindowSafely(window, ordered: .above)
+
+                // Opening beside the parent keeps the group's tabs together, so join its group.
+                (window as? TerminalWindow)?.tabGroupName = (parent as? TerminalWindow)?.tabGroupName
             }
         }
 
@@ -949,6 +952,7 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
         let tabIndex: Int?
         weak var tabGroup: NSWindowTabGroup?
         let tabColor: TerminalTabColor
+        let tabGroupName: String?
     }
 
     convenience init(_ ghostty: Ghostty.App, with undoState: UndoState) {
@@ -960,6 +964,7 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
             window.setFrame(undoState.frame, display: true)
             if let terminalWindow = window as? TerminalWindow {
                 terminalWindow.tabColor = undoState.tabColor
+                terminalWindow.tabGroupName = undoState.tabGroupName
             }
 
             // If we have a tab group and index, restore the tab to its original position
@@ -1004,7 +1009,8 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
             focusedSurface: focusedSurface?.id,
             tabIndex: window.tabGroup?.windows.firstIndex(of: window),
             tabGroup: window.tabGroup,
-            tabColor: (window as? TerminalWindow)?.tabColor ?? .none)
+            tabColor: (window as? TerminalWindow)?.tabColor ?? .none,
+            tabGroupName: (window as? TerminalWindow)?.tabGroupName)
     }
 
     // MARK: - NSWindowController

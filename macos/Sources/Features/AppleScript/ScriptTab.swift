@@ -84,6 +84,38 @@ final class ScriptTab: NSObject {
         }
     }
 
+    /// Exposed as the AppleScript `group name` property. An empty string means no group.
+    @objc(groupName)
+    var groupName: String {
+        get {
+            guard NSApp.isAppleScriptEnabled else { return "" }
+            return (controller?.window as? TerminalWindow)?.tabGroupName ?? ""
+        }
+        set {
+            guard NSApp.isAppleScriptEnabled else { return }
+            let name = newValue.trimmingCharacters(in: .whitespacesAndNewlines)
+            (controller?.window as? TerminalWindow)?.moveToTabGroup(name.isEmpty ? nil : name)
+        }
+    }
+
+    /// Exposed as the AppleScript `group color` property: the color of the tab's group.
+    @objc(groupColor)
+    var groupColor: FourCharCode {
+        get {
+            guard NSApp.isAppleScriptEnabled,
+                  let name = (controller?.window as? TerminalWindow)?.tabGroupName
+            else { return TerminalTabColor.none.scriptCode }
+            return TerminalTabGroupStore.color(for: name).scriptCode
+        }
+        set {
+            guard NSApp.isAppleScriptEnabled,
+                  let name = (controller?.window as? TerminalWindow)?.tabGroupName,
+                  let color = TerminalTabColor(scriptCode: newValue)
+            else { return }
+            TerminalTabGroupStore.setColor(color, for: name)
+        }
+    }
+
     /// Exposed as the AppleScript `focused terminal` property.
     ///
     /// Uses the currently focused surface for this tab.

@@ -22,9 +22,43 @@ final class TerminalTabSidebarModel: ObservableObject {
         let keyEquivalent: String?
         let color: TerminalTabColor
         let isSelected: Bool
+
+        /// The name of the tab group the tab belongs to, if any.
+        let group: String?
+    }
+
+    /// A named tab group, drawn as one container holding its tabs.
+    struct Group: Identifiable, Equatable {
+        var id: String { name }
+        let name: String
+        let color: TerminalTabColor
+        let isCollapsed: Bool
+        let tabs: [Tab]
+    }
+
+    /// One entry in the sidebar: a tab that isn't in any group, or a whole group.
+    enum Section: Identifiable, Equatable {
+        case tab(Tab)
+        case group(Group)
+
+        var id: String {
+            switch self {
+            case .tab(let tab): "tab-\(tab.id.hexString)"
+            case .group(let group): "group-\(group.name)"
+            }
+        }
     }
 
     @Published private(set) var tabs: [Tab] = []
+    @Published private(set) var sections: [Section] = []
+
+    /// The names of the groups in this window, in sidebar order.
+    var groupNames: [String] {
+        sections.compactMap { section in
+            if case .group(let group) = section { return group.name }
+            return nil
+        }
+    }
 
     /// The window this sidebar is shown in.
     weak var window: NSWindow? {
@@ -107,12 +141,36 @@ final class TerminalTabSidebarModel: ObservableObject {
                 keyEquivalent: shortcut.map { "\($0)" },
                 color: (tabWindow as? TerminalWindow)?.tabColor ?? .none,
                 // Our window is only on screen while it is the selected tab.
-                isSelected: tabWindow === window
+                isSelected: tabWindow === window,
+                group: (tabWindow as? TerminalWindow)?.tabGroupName
             )
         }
 
-        guard newTabs != tabs else { return }
+        let newSections = Self.sections(for: newTabs)
+        guard newTabs != tabs || newSections != sections else { return }
         tabs = newTabs
+        sections = newSections
+    }
+
+    /// Lists each group once, where its first tab is. Moving a tab into a group places it
+    /// beside the group's other tabs, so a group's tabs are normally adjacent anyway.
+    private static func sections(for tabs: [Tab]) -> [Section] {
+        var sections: [Section] = []
+        var seen: Set<String> = []
+        for tab in tabs {
+            guard let name = tab.group else {
+                sections.append(.tab(tab))
+                continue
+            }
+            guard seen.insert(name).inserted else { continue }
+            sections.append(.group(Group(
+                name: name,
+                color: TerminalTabGroupStore.color(for: name),
+                isCollapsed: TerminalTabGroupStore.isCollapsed(name),
+                tabs: tabs.filter { $0.group == name }
+            )))
+        }
+        return sections
     }
 
     func newTab() {
@@ -154,6 +212,123 @@ final class TerminalTabSidebarModel: ObservableObject {
         (tabWindow(for: tab) as? TerminalWindow)?.tabColor = color
     }
 
+    // MARK: Tab Groups
+
+    func move(_ tab: Tab, toGroup name: String?) {
+        (tabWindow(for: tab) as? TerminalWindow)?.moveToTabGroup(name)
+    }
+
+    func setGroupCollapsed(_ isCollapsed: Bool, _ name: String) {
+        TerminalTabGroupStore.setCollapsed(isCollapsed, for: name)
+    }
+
+    func setGroupColor(_ color: TerminalTabColor, _ name: String) {
+        TerminalTabGroupStore.setColor(color, for: name)
+    }
+
+    func ungroup(_ name: String) {
+        for case let tabWindow as TerminalWindow in tabWindows where tabWindow.tabGroupName == name {
+            tabWindow.tabGroupName = nil
+        }
+    }
+
+    func renameGroup(_ name: String, to newName: String) {
+        guard newName != name else { return }
+        TerminalTabGroupStore.rename(name, to: newName)
+        for case let tabWindow as TerminalWindow in tabWindows where tabWindow.tabGroupName == name {
+            tabWindow.tabGroupName = newName
+        }
+    }
+
+    /// Asks for a name for a new group and moves the tab into it.
+    func promptNewGroup(for tab: Tab) {
+        promptGroupName(title: "New Group", initialValue: "") { [weak self] name in
+            self?.move(tab, toGroup: name)
+        }
+    }
+
+    func promptRenameGroup(_ name: String) {
+        promptGroupName(title: "Rename Group", initialValue: name) { [weak self] newName in
+            self?.renameGroup(name, to: newName)
+        }
+    }
+
+    private func promptGroupName(title: String, initialValue: String, completion: @escaping (String) -> Void) {
+        guard let window else { return }
+        let alert = NSAlert()
+        alert.messageText = title
+        alert.addButton(withTitle: "OK")
+        alert.addButton(withTitle: "Cancel")
+
+        let field = NSTextField(string: initialValue)
+        field.placeholderString = "Group name"
+        field.frame = NSRect(x: 0, y: 0, width: 240, height: 24)
+        alert.accessoryView = field
+        alert.window.initialFirstResponder = field
+
+        alert.beginSheetModal(for: window) { response in
+            guard response == .alertFirstButtonReturn else { return }
+            let name = field.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !name.isEmpty else { return }
+            completion(name)
+        }
+    }
+
+    /// The right-click menu for a group's header.
+    func contextMenu(forGroup group: Group) -> NSMenu {
+        let menu = NSMenu()
+        menu.autoenablesItems = false
+
+        menu.addItem(menuItem(group.isCollapsed ? "Expand Group" : "Collapse Group") { [weak self] in
+            self?.setGroupCollapsed(!group.isCollapsed, group.name)
+        })
+        menu.addItem(menuItem("Rename Group...", symbol: "pencil.line") { [weak self] in
+            self?.promptRenameGroup(group.name)
+        })
+        menu.addItem(menuItem("Ungroup Tabs", symbol: "rectangle.stack.badge.minus") { [weak self] in
+            self?.ungroup(group.name)
+        })
+
+        menu.addItem(.separator())
+        let palette = NSHostingView(rootView: TabColorMenuView(selectedColor: group.color, title: "Group Color") { [weak self] color in
+            self?.setGroupColor(color, group.name)
+        })
+        palette.frame.size = palette.intrinsicContentSize
+        let paletteItem = NSMenuItem()
+        paletteItem.view = palette
+        menu.addItem(paletteItem)
+
+        return menu
+    }
+
+    private func groupSubmenu(for tab: Tab) -> NSMenuItem {
+        let submenu = NSMenu()
+        submenu.autoenablesItems = false
+        for name in groupNames {
+            let item = menuItem(name, isEnabled: name != tab.group) { [weak self] in
+                self?.move(tab, toGroup: name)
+            }
+            item.state = name == tab.group ? .on : .off
+            submenu.addItem(item)
+        }
+        if !groupNames.isEmpty {
+            submenu.addItem(.separator())
+        }
+        submenu.addItem(menuItem("New Group...") { [weak self] in
+            self?.promptNewGroup(for: tab)
+        })
+        if tab.group != nil {
+            submenu.addItem(menuItem("Remove from Group") { [weak self] in
+                self?.move(tab, toGroup: nil)
+            })
+        }
+
+        let item = NSMenuItem(title: "Move to Group", action: nil, keyEquivalent: "")
+        item.setImageIfDesired(systemSymbolName: "rectangle.stack")
+        item.submenu = submenu
+        return item
+    }
+
     /// The right-click menu for a tab. It has the same items as a native tab's menu, including
     /// the tab color palette, which is why it is an AppKit menu: the palette is a custom menu
     /// item view and SwiftUI menus can't hold one.
@@ -182,6 +357,7 @@ final class TerminalTabSidebarModel: ObservableObject {
         menu.addItem(menuItem("Rename Tab...", symbol: "pencil.line") { [weak self] in
             self?.promptTitle(tab)
         })
+        menu.addItem(groupSubmenu(for: tab))
 
         let palette = NSHostingView(rootView: TabColorMenuView(selectedColor: tab.color) { [weak self] color in
             self?.setColor(color, for: tab)
@@ -337,10 +513,8 @@ struct TerminalTabSidebar: View {
                 .padding(.bottom, 6)
 
                 ScrollView(showsIndicators: false) {
-                    LazyVStack(spacing: 2) {
-                        ForEach(model.tabs) { tab in
-                            TerminalTabSidebarRow(model: model, tab: tab, isCompact: true)
-                        }
+                    LazyVStack(spacing: 0) {
+                        sectionList(isCompact: true)
                     }
                     .padding(.bottom, 6)
                 }
@@ -354,17 +528,32 @@ struct TerminalTabSidebar: View {
                 .frame(height: 40)
 
                 ScrollView {
-                    LazyVStack(spacing: 2) {
-                        ForEach(model.tabs) { tab in
-                            TerminalTabSidebarRow(model: model, tab: tab, isCompact: false)
-                        }
+                    LazyVStack(spacing: 0) {
+                        sectionList(isCompact: false)
                     }
-                    .padding(.horizontal, 6)
                     .padding(.bottom, 6)
                 }
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+    }
+
+    /// The tabs and groups as flat, full-width blocks with a hairline between each.
+    private func sectionList(isCompact: Bool) -> some View {
+        ForEach(model.sections) { section in
+            VStack(spacing: 0) {
+                switch section {
+                case .tab(let tab):
+                    TerminalTabSidebarRow(model: model, tab: tab, isCompact: isCompact)
+                case .group(let group):
+                    TerminalTabSidebarGroup(model: model, group: group, isCompact: isCompact)
+                }
+
+                Rectangle()
+                    .fill(Color.primary.opacity(0.08))
+                    .frame(height: 1)
+            }
+        }
     }
 
     private var collapseButton: some View {
@@ -491,12 +680,16 @@ private extension View {
     }
 }
 
-/// One tab in the sidebar: a pill-shaped row when the sidebar is expanded, or a round
-/// tile showing its key equivalent in the collapsed rail. The selected tab is drawn on glass like a native tab.
+/// One tab in the sidebar: a flat, full-width row when the sidebar is expanded, or a tile
+/// showing its key equivalent in the collapsed rail. The selected tab gets a solid highlight.
 private struct TerminalTabSidebarRow: View {
     let model: TerminalTabSidebarModel
     let tab: TerminalTabSidebarModel.Tab
     let isCompact: Bool
+
+    /// Whether the row sits on a group's tinted block, where the selected tab needs a
+    /// stronger fill to stand out.
+    var isInGroup = false
 
     @State private var isHovering = false
 
@@ -504,13 +697,9 @@ private struct TerminalTabSidebarRow: View {
         content
             .font(.system(size: 13))
             .foregroundStyle(Color.primary.opacity(tab.isSelected ? 1 : 0.75))
-            .background(Capsule().fill(hoverFill))
-            .terminalTabSidebarGlass(
-                in: Capsule(),
-                isEnabled: tab.isSelected,
-                fallback: Color.primary.opacity(0.14)
-            )
-            .contentShape(Capsule())
+            .frame(maxWidth: .infinity)
+            .background(Rectangle().fill(rowFill))
+            .contentShape(Rectangle())
             .onTapGesture { model.select(tab) }
             .onHover { isHovering = $0 }
             .help(isCompact ? tab.title : "")
@@ -521,8 +710,10 @@ private struct TerminalTabSidebarRow: View {
             .accessibilityAction { model.select(tab) }
     }
 
-    private var hoverFill: Color {
-        Color.primary.opacity(!tab.isSelected && isHovering ? 0.08 : 0)
+    /// Rows are flat: the selected tab gets a solid highlight, and a hovered one a lighter one.
+    private var rowFill: Color {
+        if tab.isSelected { return Color.primary.opacity(isInGroup ? 0.16 : 0.12) }
+        return Color.primary.opacity(isHovering ? 0.06 : 0)
     }
 
     @ViewBuilder
@@ -578,9 +769,138 @@ private struct TerminalTabSidebarRow: View {
                     .foregroundStyle(.secondary)
             }
         }
-        .padding(.leading, 4)
+        .padding(.leading, 6)
         .padding(.trailing, 10)
-        .frame(height: 28)
+        .frame(height: 32)
+    }
+}
+
+/// A tab group: one flat tinted block holding a header with the group's name and the
+/// group's tabs, so the group reads as a single object. In the collapsed rail, a color bar
+/// stands in for the header. A collapsed group still shows its selected tab, if it has one.
+private struct TerminalTabSidebarGroup: View {
+    let model: TerminalTabSidebarModel
+    let group: TerminalTabSidebarModel.Group
+    let isCompact: Bool
+
+    @Environment(\.colorScheme) private var colorScheme
+
+    var body: some View {
+        VStack(spacing: 0) {
+            if isCompact {
+                compactHeader
+            } else {
+                header
+            }
+
+            ForEach(visibleTabs) { tab in
+                TerminalTabSidebarRow(model: model, tab: tab, isCompact: isCompact, isInGroup: true)
+            }
+        }
+        .frame(maxWidth: .infinity)
+        .background(Rectangle().fill(fillColor))
+    }
+
+    private var visibleTabs: [TerminalTabSidebarModel.Tab] {
+        group.isCollapsed ? group.tabs.filter(\.isSelected) : group.tabs
+    }
+
+    /// How many tabs a collapsed group is hiding.
+    private var hiddenCount: Int {
+        group.tabs.count - visibleTabs.count
+    }
+
+    private var header: some View {
+        HStack(spacing: 6) {
+            Image(systemName: "chevron.right")
+                .font(.system(size: 10, weight: .semibold))
+                .opacity(0.7)
+                .rotationEffect(.degrees(group.isCollapsed ? 0 : 90))
+                .frame(width: 14)
+
+            Text(group.name)
+                .font(.system(size: 13, weight: .semibold))
+                .lineLimit(1)
+                .truncationMode(.tail)
+
+            Spacer(minLength: 4)
+
+            if group.isCollapsed && hiddenCount > 0 {
+                Text(visibleTabs.isEmpty ? "\(hiddenCount)" : "+\(hiddenCount)")
+                    .font(.system(size: 11, weight: .medium).monospacedDigit())
+                    .padding(.horizontal, 6)
+                    .padding(.vertical, 1)
+                    .background(Capsule().fill(accentColor.opacity(0.2)))
+            }
+        }
+        .foregroundStyle(nameColor)
+        .padding(.leading, 10)
+        .padding(.trailing, 10)
+        .frame(height: 30)
+        .contentShape(Rectangle())
+        .onTapGesture { toggle() }
+        .help(group.isCollapsed ? "Expand \(group.name)" : "Collapse \(group.name)")
+        .overlay(TerminalTabSidebarMenuArea { model.contextMenu(forGroup: group) })
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("Group \(group.name), \(group.tabs.count) tabs")
+        .accessibilityAddTraits(.isButton)
+        .accessibilityAction { toggle() }
+    }
+
+    /// In the collapsed rail: a color bar, or when the group is collapsed, a tile with the
+    /// number of tabs it hides.
+    @ViewBuilder
+    private var compactHeader: some View {
+        Group {
+            if group.isCollapsed && hiddenCount > 0 {
+                Text("\(hiddenCount)")
+                    .font(.system(size: 11, weight: .semibold).monospacedDigit())
+                    .foregroundStyle(nameColor)
+                    .frame(width: 30, height: 22)
+            } else {
+                Rectangle()
+                    .fill(accentColor)
+                    .frame(height: 3)
+                    .frame(maxWidth: .infinity)
+            }
+        }
+        .contentShape(Rectangle())
+        .onTapGesture { toggle() }
+        .help(group.name)
+        .overlay(TerminalTabSidebarMenuArea { model.contextMenu(forGroup: group) })
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel("Group \(group.name), \(group.tabs.count) tabs")
+        .accessibilityAddTraits(.isButton)
+        .accessibilityAction { toggle() }
+    }
+
+    private func toggle() {
+        model.setGroupCollapsed(!group.isCollapsed, group.name)
+    }
+
+    /// Graphite (and no color) groups are drawn neutral: a gray name on a gray fill would be
+    /// as hard to read as the captions this is meant to replace.
+    private var isNeutral: Bool {
+        group.color == .graphite || group.color.displayColor == nil
+    }
+
+    private var accentColor: Color {
+        guard !isNeutral, let color = group.color.displayColor else { return Color.primary.opacity(0.5) }
+        return Color(nsColor: color)
+    }
+
+    /// The group color, lightened on dark backgrounds and darkened on light ones so the
+    /// name stays readable on the container's tint.
+    private var nameColor: Color {
+        guard !isNeutral, let color = group.color.displayColor else { return Color.primary.opacity(0.9) }
+        let toward: NSColor = colorScheme == .dark ? .white : .black
+        return Color(nsColor: color.blended(withFraction: 0.3, of: toward) ?? color)
+    }
+
+    private var fillColor: Color {
+        if isNeutral { return Color.primary.opacity(0.06) }
+        // Yellow turns muddy at the opacity the other colors use.
+        return accentColor.opacity(group.color == .yellow ? 0.08 : 0.12)
     }
 }
 

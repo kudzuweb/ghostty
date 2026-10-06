@@ -73,6 +73,16 @@ class TerminalWindow: NSWindow {
         }
     }
 
+    /// The name of the sidebar group this window's tab belongs to, or nil when it is ungrouped.
+    /// Group colors and collapsed state are shared by name in `TerminalTabGroupStore`.
+    var tabGroupName: String? {
+        didSet {
+            guard tabGroupName != oldValue else { return }
+            invalidateRestorableState()
+            NotificationCenter.default.post(name: .terminalTabsDidChange, object: nil)
+        }
+    }
+
     // MARK: NSWindow Overrides
 
     override var toolbar: NSToolbar? {
