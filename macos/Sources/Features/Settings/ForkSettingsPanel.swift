@@ -57,6 +57,8 @@ private struct ForkSettingsView: View {
                     SleepGuardSection()
                     Divider()
                     KeepAliveSection()
+                    Divider()
+                    UsageCutoffSection()
                 }
                 .padding(20)
             }
@@ -315,6 +317,121 @@ private struct KeepAliveSection: View {
         let value = text.trimmingCharacters(in: .whitespaces)
         guard value.range(of: #"^(\d+\s*(y|w|d|h|m|s|ms|us|µs|ns)\s*)+$"#, options: .regularExpression) != nil else {
             errorMessage = "Enter a duration with a unit, such as 30s or 5m."
+            return
+        }
+        set(key, value)
+    }
+}
+
+// MARK: Usage cutoff and overnight
+
+private struct UsageCutoffSection: View {
+    @ObservedObject private var keepAlive = KeepAlive.shared
+    @State private var enabled = false
+    @State private var stopSessions = false
+    @State private var workdayStart = ""
+    @State private var usable = ""
+    @State private var latestReset = ""
+    @State private var margin = ""
+    @State private var warning = ""
+    @State private var errorMessage: String?
+
+    var body: some View {
+        ForkSettingsSection(title: "Usage cutoff") {
+            Toggle("Overnight run", isOn: Binding(
+                get: { keepAlive.overnightActive },
+                set: { keepAlive.setOvernight($0) }
+            ))
+            Text("Until the workday starts, keeps every tab running an agent alive, applies the usage cutoff, "
+                + "sets the sleep guard to Auto and silences keep alive notifications. It turns itself off "
+                + "at the workday start.")
+                .font(.caption).foregroundStyle(.secondary)
+
+            Divider()
+
+            Toggle("Usage cutoff for tabs with keep alive", isOn: Binding(
+                get: { enabled },
+                set: { enabled = $0; set("usage-cutoff", $0 ? "true" : "false") }
+            ))
+            Text("Winds work down so the workday starts in a usage window that is mostly unused. Idle Claude "
+                + "Code sessions are asked to wrap up before the cutoff, and nothing is relaunched or nudged "
+                + "after it until the workday starts.")
+                .font(.caption).foregroundStyle(.secondary)
+
+            field("Workday start (HH:MM)", text: $workdayStart, placeholder: "10:00") {
+                let value = workdayStart.trimmingCharacters(in: .whitespaces)
+                guard value.range(of: #"^([01]?\d|2[0-3]):[0-5]\d$"#, options: .regularExpression) != nil else {
+                    errorMessage = "Enter a 24-hour time such as 10:00 or 8:30."
+                    return
+                }
+                set("usage-cutoff-workday-start", value)
+            }
+            field("Usable part of the window", text: $usable, placeholder: "2h") {
+                setDuration("usage-cutoff-usable", usable)
+            }
+            field("Latest reset after workday start", text: $latestReset, placeholder: "2h") {
+                setDuration("usage-cutoff-latest-reset", latestReset)
+            }
+            field("Margin before the cutoff", text: $margin, placeholder: "15m") {
+                setDuration("usage-cutoff-margin", margin)
+            }
+            field("Wrap-up warning before the cutoff", text: $warning, placeholder: "25m") {
+                setDuration("usage-cutoff-warning", warning)
+            }
+
+            Toggle("Stop sessions at the cutoff", isOn: Binding(
+                get: { stopSessions },
+                set: { stopSessions = $0; set("usage-cutoff-stop-sessions", $0 ? "true" : "false") }
+            ))
+            Text("Sends SIGTERM to each covered session when the cutoff is reached, as the old watchdog did. "
+                + "Off by default.")
+                .font(.caption).foregroundStyle(.secondary)
+
+            Text("Durations are Ghostty durations such as 30m or 2h. Press Return to apply a field.")
+                .font(.caption).foregroundStyle(.secondary)
+            if let errorMessage {
+                Text(errorMessage).font(.caption).foregroundStyle(.red)
+            }
+        }
+        .onAppear(perform: load)
+    }
+
+    private func field(
+        _ title: String,
+        text: Binding<String>,
+        placeholder: String,
+        commit: @escaping () -> Void
+    ) -> some View {
+        HStack {
+            Text(title)
+            Spacer()
+            TextField(placeholder, text: text)
+                .textFieldStyle(.roundedBorder)
+                .multilineTextAlignment(.trailing)
+                .frame(width: 80)
+                .onSubmit(commit)
+        }
+    }
+
+    private func load() {
+        let settings = KeepAlive.shared.settings
+        enabled = settings.usageCutoff
+        stopSessions = settings.cutoffStopSessions
+        workdayStart = ConfigFile.value(of: "usage-cutoff-workday-start") ?? "10:00"
+        usable = ConfigFile.value(of: "usage-cutoff-usable") ?? "2h"
+        latestReset = ConfigFile.value(of: "usage-cutoff-latest-reset") ?? "2h"
+        margin = ConfigFile.value(of: "usage-cutoff-margin") ?? "15m"
+        warning = ConfigFile.value(of: "usage-cutoff-warning") ?? "25m"
+    }
+
+    private func set(_ key: String, _ value: String) {
+        errorMessage = ConfigFile.set(key, to: value, underForkHeader: true)
+    }
+
+    private func setDuration(_ key: String, _ text: String) {
+        let value = text.trimmingCharacters(in: .whitespaces)
+        guard value.range(of: #"^(\d+\s*(y|w|d|h|m|s|ms|us|µs|ns)\s*)+$"#, options: .regularExpression) != nil else {
+            errorMessage = "Enter a duration with a unit, such as 30m or 2h."
             return
         }
         set(key, value)

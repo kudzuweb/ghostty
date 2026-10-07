@@ -734,6 +734,46 @@ extension Ghostty {
             return path.isEmpty ? nil : (path as NSString).expandingTildeInPath
         }
 
+        /// `usage-cutoff`.
+        var usageCutoff: Bool { boolValue("usage-cutoff") }
+
+        /// `usage-cutoff-stop-sessions`.
+        var usageCutoffStopSessions: Bool { boolValue("usage-cutoff-stop-sessions") }
+
+        /// `overnight-run`.
+        var overnightRun: Bool { boolValue("overnight-run") }
+
+        /// `usage-cutoff-workday-start`, in minutes after local midnight.
+        var usageCutoffWorkdayMinutes: Int {
+            let defaultValue = 10 * 60
+            guard let config = self.config else { return defaultValue }
+            var v: UInt16 = 0
+            let key = "usage-cutoff-workday-start"
+            guard ghostty_config_get(config, &v, key, UInt(key.lengthOfBytes(using: .utf8))) else { return defaultValue }
+            return Int(v)
+        }
+
+        /// The usage cutoff keys that shape the computation, in seconds.
+        var usageCutoffSettings: UsageCutoff.Settings {
+            UsageCutoff.Settings(
+                margin: durationSeconds("usage-cutoff-margin", default: 15 * 60),
+                usable: durationSeconds("usage-cutoff-usable", default: 2 * 3600),
+                latestReset: durationSeconds("usage-cutoff-latest-reset", default: 2 * 3600),
+                workdayMinutes: usageCutoffWorkdayMinutes)
+        }
+
+        /// `usage-cutoff-warning`, in seconds.
+        var usageCutoffWarning: TimeInterval {
+            durationSeconds("usage-cutoff-warning", default: 25 * 60)
+        }
+
+        private func boolValue(_ key: String) -> Bool {
+            guard let config = self.config else { return false }
+            var v = false
+            _ = ghostty_config_get(config, &v, key, UInt(key.lengthOfBytes(using: .utf8)))
+            return v
+        }
+
         /// A duration key in seconds. The C API reports durations in milliseconds.
         private func durationSeconds(_ key: String, default defaultValue: TimeInterval) -> TimeInterval {
             guard let config = self.config else { return defaultValue }

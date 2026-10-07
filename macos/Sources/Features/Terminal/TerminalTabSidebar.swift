@@ -532,12 +532,14 @@ struct TerminalTabSidebar: View {
     @ObservedObject var model: TerminalTabSidebarModel
     @Binding var isCollapsed: Bool
     @ObservedObject private var sleepGuard = SleepGuard.shared
+    @ObservedObject private var keepAlive = KeepAlive.shared
 
     var body: some View {
         VStack(spacing: 0) {
             if isCollapsed {
                 VStack(spacing: 4) {
                     collapseButton
+                    overnightButton
                     sleepGuardButton
                     settingsButton
                     newTabButton
@@ -555,6 +557,7 @@ struct TerminalTabSidebar: View {
                 HStack {
                     collapseButton
                     Spacer()
+                    overnightButton
                     sleepGuardButton
                     settingsButton
                     newTabButton
@@ -597,6 +600,16 @@ struct TerminalTabSidebar: View {
             label: isCollapsed ? "Show Tab Sidebar" : "Hide Tab Sidebar"
         ) {
             isCollapsed.toggle()
+        }
+    }
+
+    private var overnightButton: some View {
+        TerminalTabSidebarButton(
+            systemName: keepAlive.overnightActive ? "moon.stars.fill" : "moon.stars",
+            label: keepAlive.overnightEndDescription.map { "Overnight run: on until \($0). Click to turn off" }
+                ?? "Overnight run: off. Click to turn on"
+        ) {
+            keepAlive.setOvernight(!keepAlive.overnightActive)
         }
     }
 

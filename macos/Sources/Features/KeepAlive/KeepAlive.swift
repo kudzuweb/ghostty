@@ -24,8 +24,13 @@ extension TerminalWindow {
 /// A tab whose session died with a crash-like exit status gets the resume command typed into
 /// it. A Claude Code session that is idle on an API error gets `continue` typed into it, on
 /// the schedule the config sets. The decisions themselves are in `KeepAliveLogic.swift`.
+///
+/// The usage cutoff (`UsageCutoff.swift`) and the overnight switch live here too, because
+/// they decide what keep alive may do to a tab: while the overnight switch is on every tab
+/// running an agent is kept alive and under the cutoff, and a tab under the cutoff is asked
+/// to wrap up and then left alone until the workday starts.
 @MainActor
-final class KeepAlive {
+final class KeepAlive: ObservableObject {
     static let shared = KeepAlive()
 
     enum BackgroundMode: String {
@@ -41,6 +46,11 @@ final class KeepAlive {
         var background = BackgroundMode.failed
         var relaunchGhostty = false
         var eventsFile: String?
+        var usageCutoff = false
+        var cutoff = UsageCutoff.Settings()
+        var cutoffWarning: TimeInterval = 25 * 60
+        var cutoffStopSessions = false
+        var overnightRun = false
     }
 
     enum EventKind: String {
@@ -49,6 +59,8 @@ final class KeepAlive {
         case nudged
         case errorNotified = "error_notified"
         case respawned
+        case cutoffWarning = "cutoff_warning"
+        case cutoffReached = "cutoff_reached"
     }
 
     static let tickInterval: TimeInterval = 30
@@ -76,6 +88,18 @@ final class KeepAlive {
         var errorUUID: String?
         var errorLastNudge: Date?
         var errorNotified = false
+        /// The workday the usage cutoff was for when the wrap-up prompt was typed here, and
+        /// when the cutoff was recorded, so each happens once per workday.
+        var wrapUpFor: Date?
+        var reachedFor: Date?
+    }
+
+    /// Where the usage cutoff stands, worked out once per tick.
+    private struct CutoffContext {
+        var cutoff: Date
+        var phase: UsageCutoff.Phase
+        /// The workday start the cutoff is aiming at. It changes when that workday begins.
+        var workday: Date
     }
 
     private var surfaceStates: [UUID: SurfaceState] = [:]
@@ -84,13 +108,26 @@ final class KeepAlive {
     /// shell integration. It is how a deliberate exit is told from a crash.
     private var exitStatuses: [UUID: Int16] = [:]
 
-    private var respawnWindows: [String: KeepAliveCrashWindow] = [:]
-    private var respawnGaveUp: Set<String> = []
+    private var respawnLimiter = KeepAliveRespawnLimiter()
     private var transcriptPaths: [String: String] = [:]
     private var claudePath: String?
     private var timer: Timer?
     private var ticking = false
     private var relaunchApplied: Bool?
+
+    // Usage cutoff and overnight state.
+    private var stampsCache: (at: Date, stamps: [Date])?
+    private static let stampsLifetime: TimeInterval = 300
+    private var reachedWorkday: Date?
+    private var lastLoggedCutoff: Date?
+
+    /// Whether the overnight switch is on and has not yet reached the workday start.
+    @Published private(set) var overnightActive = false
+
+    /// The workday start at which the overnight switch ends. It is kept in `UserDefaults`
+    /// so a Ghostty restarted in the night still ends it in the morning.
+    private var overnightEndsAt: Date?
+    private static let overnightEndKey = "OvernightRunEndsAt"
 
     // MARK: Lifecycle
 
@@ -109,10 +146,22 @@ final class KeepAlive {
             rateLimitInterval: config.keepAliveRateLimitInterval,
             background: config.keepAliveBackground,
             relaunchGhostty: config.keepAliveRelaunchGhostty,
-            eventsFile: config.keepAliveEventsFile)
+            eventsFile: config.keepAliveEventsFile,
+            usageCutoff: config.usageCutoff,
+            cutoff: config.usageCutoffSettings,
+            cutoffWarning: config.usageCutoffWarning,
+            cutoffStopSessions: config.usageCutoffStopSessions,
+            overnightRun: config.overnightRun)
         NSLog("KeepAlive config: maxCrashes=%d server=%.0fs rate=%.0fs background=%@ relaunchGhostty=%@",
               settings.maxCrashes, settings.serverErrorInterval, settings.rateLimitInterval,
               settings.background.rawValue, settings.relaunchGhostty ? "true" : "false")
+        NSLog("KeepAlive usage cutoff: on=%@ workday=%02d:%02d usable=%.0fs latestReset=%.0fs margin=%.0fs warning=%.0fs "
+              + "stopSessions=%@ overnight=%@",
+              settings.usageCutoff ? "true" : "false", settings.cutoff.workdayMinutes / 60,
+              settings.cutoff.workdayMinutes % 60, settings.cutoff.usable, settings.cutoff.latestReset,
+              settings.cutoff.margin, settings.cutoffWarning, settings.cutoffStopSessions ? "true" : "false",
+              settings.overnightRun ? "true" : "false")
+        refreshOvernight()
         if relaunchApplied != settings.relaunchGhostty {
             relaunchApplied = settings.relaunchGhostty
             KeepAliveRelaunchJob.sync(enabled: settings.relaunchGhostty)
@@ -138,14 +187,17 @@ final class KeepAlive {
 
     // MARK: Notifications
 
-    /// While this returns true, no keep alive notification is shown. The overnight switch
-    /// (a later phase) sets it. Events are still written to the events file.
-    var notificationsSuppressed: () -> Bool = { false }
+    /// While this returns true, no keep alive notification is shown: the overnight switch
+    /// is on. Events are still written to the events file.
+    func notificationsSuppressed() -> Bool { overnightActive }
 
     /// The one place keep alive shows a macOS notification.
     func notifyKeepAlive(title: String, body: String) {
         NSLog("KeepAlive notification: %@ | %@", title, body)
-        guard !notificationsSuppressed() else { return }
+        guard !notificationsSuppressed() else {
+            NSLog("KeepAlive: the overnight switch is on, so the notification was not shown")
+            return
+        }
         let center = UNUserNotificationCenter.current()
         center.requestAuthorization(options: [.alert, .sound]) { _, error in
             if let error { NSLog("KeepAlive: notification authorization failed: %@", "\(error)") }
@@ -161,6 +213,52 @@ final class KeepAlive {
             content.sound = .default
             center.add(UNNotificationRequest(identifier: UUID().uuidString, content: content, trigger: nil))
         }
+    }
+
+    // MARK: Overnight switch
+
+    /// Writes `overnight-run` to the config file and reloads. The reload calls `apply(_:)`.
+    func setOvernight(_ isOn: Bool) {
+        if let error = ConfigFile.set("overnight-run", to: isOn ? "true" : "false", underForkHeader: true) {
+            SleepGuardErrorPanel.shared.show(message: error, closeAfter: nil)
+        }
+    }
+
+    /// When the overnight switch ends, for the sidebar's tooltip.
+    var overnightEndDescription: String? {
+        guard overnightActive, let end = overnightEndsAt else { return nil }
+        let formatter = DateFormatter()
+        formatter.dateFormat = "HH:mm"
+        return formatter.string(from: end)
+    }
+
+    /// Brings `overnightActive` in line with the config and the clock. The switch ends at
+    /// the first workday start after it was turned on, by writing `overnight-run = false`.
+    func refreshOvernight(now: Date = Date()) {
+        let defaults = UserDefaults.ghostty
+        var active = false
+        if settings.overnightRun {
+            if overnightEndsAt == nil {
+                overnightEndsAt = defaults.object(forKey: Self.overnightEndKey) as? Date
+                    ?? UsageCutoff.workday(after: now, workdayMinutes: settings.cutoff.workdayMinutes)
+                defaults.set(overnightEndsAt, forKey: Self.overnightEndKey)
+            }
+            if let end = overnightEndsAt, now >= end {
+                NSLog("KeepAlive: the workday has started, so the overnight switch turns itself off")
+                if let error = ConfigFile.set("overnight-run", to: "false", underForkHeader: true) {
+                    NSLog("KeepAlive: couldn't turn the overnight switch off in the config file: %@", error)
+                }
+            } else {
+                active = true
+            }
+        } else if overnightEndsAt != nil {
+            overnightEndsAt = nil
+            defaults.removeObject(forKey: Self.overnightEndKey)
+        }
+        guard active != overnightActive else { return }
+        overnightActive = active
+        NSLog("KeepAlive: overnight switch is now %@", active ? "on" : "off")
+        SleepGuard.shared.overnightDidChange()
     }
 
     // MARK: Events
@@ -213,6 +311,7 @@ final class KeepAlive {
     // MARK: The tick
 
     private func tick() {
+        refreshOvernight()
         guard !ticking else { return }
         let tabs = keptAliveTabs()
         let wantsBackground = settings.background == .failed
@@ -226,7 +325,8 @@ final class KeepAlive {
         // sessions' state in one call, so it runs at most once per tick.
         Task {
             let snapshot = await fetchAgents()
-            process(tabs, snapshot: snapshot)
+            let context = await cutoffContext(for: tabs)
+            process(tabs, snapshot: snapshot, cutoff: context)
             if wantsBackground, let snapshot { await respawnFailed(snapshot.background) }
             ticking = false
         }
@@ -234,23 +334,70 @@ final class KeepAlive {
 
     private typealias Tab = (window: TerminalWindow, surfaces: [Ghostty.SurfaceView])
 
+    /// The tabs keep alive looks at: those with keep alive on, and every tab while the
+    /// overnight switch is on. A tab in the second group does nothing unless an agent runs
+    /// in it, and its own keep alive flag is never changed.
     private func keptAliveTabs() -> [Tab] {
         NSApp.windows.compactMap { window in
-            guard let terminalWindow = window as? TerminalWindow, terminalWindow.keepAlive,
+            guard let terminalWindow = window as? TerminalWindow,
                   let controller = terminalWindow.windowController as? BaseTerminalController
             else { return nil }
+            guard terminalWindow.keepAlive || overnightActive else {
+                // A gave-up mark set by the overnight switch must not outlive it.
+                terminalWindow.keepAliveGaveUp = false
+                return nil
+            }
             return (terminalWindow, controller.surfaceTree.root?.leaves() ?? [])
         }
     }
 
-    private func process(_ tabs: [Tab], snapshot: KeepAliveAgents.Snapshot?) {
+    /// Whether the usage cutoff covers a tab: the cutoff is on and the tab has keep alive on,
+    /// or the overnight switch is on.
+    private func usageCutoffApplies(to window: TerminalWindow) -> Bool {
+        overnightActive || (settings.usageCutoff && window.keepAlive)
+    }
+
+    // MARK: Usage cutoff
+
+    /// The assistant-message times from recent transcripts, read off the main thread and
+    /// reused for a few minutes.
+    private func transcriptStamps(now: Date) async -> [Date] {
+        if let cache = stampsCache, now.timeIntervalSince(cache.at) < Self.stampsLifetime { return cache.stamps }
+        let stamps = await Task.detached { UsageCutoff.assistantTimestamps(now: now) }.value
+        stampsCache = (now, stamps)
+        return stamps
+    }
+
+    /// Where the cutoff stands for this tick, or nil when no watched tab is covered by it
+    /// or no cutoff is due yet. Reaching the cutoff holds until the workday starts, even if
+    /// a later computation moves the cutoff.
+    private func cutoffContext(for tabs: [Tab]) async -> CutoffContext? {
+        guard tabs.contains(where: { usageCutoffApplies(to: $0.window) }) else { return nil }
+        let now = Date()
+        let workday = UsageCutoff.workday(after: now, workdayMinutes: settings.cutoff.workdayMinutes)
+        if reachedWorkday != workday { reachedWorkday = nil }
+        let stamps = await transcriptStamps(now: now)
+        let computed = UsageCutoff.cutoff(stamps: stamps, now: now, settings: settings.cutoff)
+        if computed != lastLoggedCutoff {
+            lastLoggedCutoff = computed
+            NSLog("KeepAlive: usage cutoff is %@ (workday start %@)",
+                  computed.map { "\($0)" } ?? "not due", "\(workday)")
+        }
+        var phase = UsageCutoff.phase(cutoff: computed, now: now, warning: settings.cutoffWarning)
+        if phase == .reached { reachedWorkday = workday }
+        if reachedWorkday == workday { phase = .reached }
+        guard phase != .clear, let cutoff = computed else { return nil }
+        return CutoffContext(cutoff: cutoff, phase: phase, workday: workday)
+    }
+
+    private func process(_ tabs: [Tab], snapshot: KeepAliveAgents.Snapshot?, cutoff: CutoffContext?) {
         let live = Set(tabs.flatMap { $0.surfaces.map(\.id) })
         surfaceStates = surfaceStates.filter { live.contains($0.key) }
         exitStatuses = exitStatuses.filter { live.contains($0.key) }
 
         for tab in tabs {
             for surface in tab.surfaces {
-                processSurface(surface, in: tab.window, snapshot: snapshot)
+                processSurface(surface, in: tab.window, snapshot: snapshot, context: cutoff)
             }
         }
     }
@@ -258,9 +405,11 @@ final class KeepAlive {
     private func processSurface(
         _ surface: Ghostty.SurfaceView,
         in window: TerminalWindow,
-        snapshot: KeepAliveAgents.Snapshot?
+        snapshot: KeepAliveAgents.Snapshot?,
+        context: CutoffContext?
     ) {
         let key = surface.id
+        let cutoff = usageCutoffApplies(to: window) ? context : nil
         var state = surfaceStates[key] ?? SurfaceState()
         defer { surfaceStates[key] = state }
 
@@ -281,6 +430,11 @@ final class KeepAlive {
                 NSLog("KeepAlive: watching %@ session %@ (pid %d) in %@", found.tool.rawValue, found.id, foreground, window.title)
             }
             state.session = RunningSession(tool: found.tool, id: found.id, pid: foreground)
+            if let cutoff {
+                handleCutoff(surface, window: window, state: &state, pid: foreground, snapshot: snapshot, cutoff: cutoff)
+                // After the cutoff nothing is typed into the session until the workday starts.
+                if cutoff.phase == .reached { return }
+            }
             if found.tool == .claude {
                 handleApiError(surface, window: window, state: &state, pid: foreground, snapshot: snapshot)
             }
@@ -309,6 +463,8 @@ final class KeepAlive {
             return
         }
         guard !window.keepAliveGaveUp else { return }
+        // Once the wrap-up is due, a session that ended is left ended, as the watchdog did.
+        if cutoff != nil { return }
 
         let title = window.title
         if state.crashes.allowAttempt(at: Date(), limit: settings.maxCrashes) {
@@ -324,6 +480,40 @@ final class KeepAlive {
             notifyKeepAlive(
                 title: "Keep alive gave up",
                 body: "\(title) crashed more than \(settings.maxCrashes) times in an hour.")
+        }
+    }
+
+    // MARK: Usage cutoff handling
+
+    private func handleCutoff(
+        _ surface: Ghostty.SurfaceView,
+        window: TerminalWindow,
+        state: inout SurfaceState,
+        pid: Int,
+        snapshot: KeepAliveAgents.Snapshot?,
+        cutoff: CutoffContext
+    ) {
+        guard let session = state.session else { return }
+        let when = cutoff.cutoff.formatted(date: .omitted, time: .shortened)
+
+        // Claude Code only: Codex has no idle status to wait for.
+        if state.wrapUpFor != cutoff.workday, session.tool == .claude, snapshot?.interactiveStatus[pid] == "idle" {
+            state.wrapUpFor = cutoff.workday
+            record(.cutoffWarning, tool: .claude, sessionID: session.id, tabTitle: window.title,
+                   message: "usage cutoff at \(when); wrap-up prompt typed")
+            type(UsageCutoff.wrapUpPrompt(cutoff: cutoff.cutoff), into: surface)
+        }
+
+        if cutoff.phase == .reached, state.reachedFor != cutoff.workday {
+            state.reachedFor = cutoff.workday
+            let prompted = state.wrapUpFor == cutoff.workday
+            var message = "usage cutoff reached at \(when)"
+            if !prompted { message += "; the wrap-up prompt was never typed" }
+            if settings.cutoffStopSessions { message += "; the session was stopped" }
+            record(.cutoffReached, tool: session.tool, sessionID: session.id, tabTitle: window.title, message: message)
+            if settings.cutoffStopSessions, let target = pid_t(exactly: pid) {
+                kill(target, SIGTERM)
+            }
         }
     }
 
@@ -400,25 +590,21 @@ final class KeepAlive {
 
     private func respawnFailed(_ sessions: [KeepAliveBackgroundSession]) async {
         let failed = KeepAliveAgents.respawnTargets(sessions)
-        let failedIDs = Set(failed.map(\.id))
-        respawnGaveUp = respawnGaveUp.intersection(failedIDs)
+        let names = Dictionary(failed.map { ($0.id, $0.name) }, uniquingKeysWith: { first, _ in first })
+        let actions = respawnLimiter.decide(failed: failed.map(\.id), now: Date(), limit: settings.maxCrashes)
 
-        for session in failed where !respawnGaveUp.contains(session.id) {
-            var window = respawnWindows[session.id] ?? KeepAliveCrashWindow()
-            let allowed = window.allowAttempt(at: Date(), limit: settings.maxCrashes)
-            respawnWindows[session.id] = window
-            guard allowed else {
-                respawnGaveUp.insert(session.id)
-                record(.gaveUp, tool: .claude, sessionID: session.id, tabTitle: session.name,
+        for action in actions {
+            switch action {
+            case .giveUp(let id):
+                let name = names[id] ?? ""
+                record(.gaveUp, tool: .claude, sessionID: id, tabTitle: name,
                        message: "background session failed more than \(settings.maxCrashes) times in 60 minutes")
-                notifyKeepAlive(
-                    title: "Keep alive gave up",
-                    body: "Background session \(session.name) keeps failing.")
-                continue
+                notifyKeepAlive(title: "Keep alive gave up", body: "Background session \(name) keeps failing.")
+            case .respawn(let id):
+                record(.respawned, tool: .claude, sessionID: id, tabTitle: names[id],
+                       message: "background session state was failed")
+                _ = await runClaude(["respawn", id])
             }
-            record(.respawned, tool: .claude, sessionID: session.id, tabTitle: session.name,
-                   message: "background session state was failed")
-            _ = await runClaude(["respawn", session.id])
         }
     }
 
