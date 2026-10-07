@@ -1,0 +1,3 @@
+# Plain black background, white text, matching Mauria's Warp setup.
+background = #000000
+foreground = #ffffff

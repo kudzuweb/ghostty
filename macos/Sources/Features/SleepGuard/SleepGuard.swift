@@ -115,19 +115,20 @@ final class SleepGuard: NSObject, ObservableObject, NSMenuDelegate {
     // MARK: Lifecycle
 
     func start() {
-        guard statusItem == nil else { return }
+        guard timer == nil else { return }
 
         if let raw = UserDefaults.ghostty.string(forKey: Self.modeKey), let saved = Mode(rawValue: raw) {
             mode = saved
         }
         lastBusy = Date()
 
-        let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
-        let menu = NSMenu()
-        menu.delegate = self
-        item.menu = menu
-        statusItem = item
-        updateStatusItem()
+        // Kept to restore the menu bar icon; the sidebar button is the only control for now.
+        // let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
+        // let menu = NSMenu()
+        // menu.delegate = self
+        // item.menu = menu
+        // statusItem = item
+        // updateStatusItem()
 
         tick()
         // Poll so the icon follows the real setting even when something else changes it.
@@ -300,14 +301,15 @@ final class SleepGuard: NSObject, ObservableObject, NSMenuDelegate {
         }
     }
 
+    // Kept to restore the menu bar icon (see `start()`).
     private func updateStatusItem() {
-        guard let button = statusItem?.button else { return }
-        let image = NSImage(systemSymbolName: symbolName, accessibilityDescription: summary)
-        image?.isTemplate = true
-        button.image = image
-        button.toolTip = tooltip
-        // Falls back to text if the symbol is ever unavailable.
-        button.title = image == nil ? (blocked == true ? "Awake" : "Sleep") : ""
+        // guard let button = statusItem?.button else { return }
+        // let image = NSImage(systemSymbolName: symbolName, accessibilityDescription: summary)
+        // image?.isTemplate = true
+        // button.image = image
+        // button.toolTip = tooltip
+        // // Falls back to text if the symbol is ever unavailable.
+        // button.title = image == nil ? (blocked == true ? "Awake" : "Sleep") : ""
     }
 
     // MARK: Menu

@@ -1,0 +1,4 @@
+macos-titlebar-style = vertical-tabs
+theme = Nu Disco
+working-directory = ~/Documents/Projects
+window-save-state = always

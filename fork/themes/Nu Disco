@@ -1,0 +1,28 @@
+# Nu Disco, adapted from the VS Code theme by dbanksdesign (MIT):
+# https://github.com/dbanksdesign/nu-disco-vscode-theme
+# Colors come from its tokens/core.json5 and tokens/dark/*. Translucent
+# colors are flattened onto the background, since Ghostty palettes have no
+# alpha. Normal ANSI colors use the theme's saturated "light" tones and bright
+# ones its pastel "lighter" tones, so terminal output matches the editor's look.
+background = #0c001f
+foreground = #efeef0
+cursor-color = #ff82b4
+cursor-text = #0c001f
+selection-background = #285c6d
+selection-foreground = #ffffff
+palette = 0=#180d2a
+palette = 1=#ff7878
+palette = 2=#67e591
+palette = 3=#fff373
+palette = 4=#6bb5ff
+palette = 5=#ff82b4
+palette = 6=#52e7e1
+palette = 7=#bebbc3
+palette = 8=#4e465b
+palette = 9=#ffb8b8
+palette = 10=#aeecc3
+palette = 11=#fff9bb
+palette = 12=#c3e7f9
+palette = 13=#ffcfe3
+palette = 14=#c4fffd
+palette = 15=#ffffff
