@@ -63,7 +63,7 @@ The change is `04dc7d039` plus `122dbdc44`, in `macos/Sources/Features/SleepGuar
 | Grace period | It defaults to 120 seconds and is read from `UserDefaults` as `SleepGuardGraceSeconds`. |
 | Failed flips | A floating Sleep Guard panel states the error. It closes itself after 30 seconds and is reused rather than stacked. Auto retries after 30 seconds. |
 | Quitting | Quitting Ghostty in Auto mode undoes a block that Auto set, so a forgotten block does not drain a laptop in a bag. |
-| Requirement | An existing `NOPASSWD` sudoers rule must allow exactly `/usr/bin/pmset -a disablesleep 1` and `/usr/bin/pmset -a disablesleep 0`. Without it Auto fails every retry and the panel appears. The rule itself is outside this repo and was not re-checked on 2026-10-07 (unverified). |
+| Requirement | An existing `NOPASSWD` sudoers rule must allow exactly `/usr/bin/pmset -a disablesleep 1` and `/usr/bin/pmset -a disablesleep 0`. Without it Auto fails every retry and the panel appears. The rule is outside this repo; on `home-laptop` it was confirmed with `sudo -n -l` on 2026-10-07. |
 | Menu bar icon | The icon is switched off. The code that creates the menu bar status item is commented out in `SleepGuard.swift`, with a note, so it can be restored by uncommenting it. |
 | NoDoz leftovers | NoDoz's unported code (commented out) and its icon are in `macos/Sources/Features/SleepGuard/NoDoz/`. |
 
