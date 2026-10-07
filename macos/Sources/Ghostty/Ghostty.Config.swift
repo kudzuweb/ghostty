@@ -659,6 +659,29 @@ extension Ghostty {
             return .milliseconds(v)
         }
 
+        // MARK: Mauria's fork settings (see FORK.md)
+
+        /// `sleep-guard-mode`. Falls back to manual when the key can't be read.
+        var sleepGuardMode: SleepGuard.Mode {
+            let defaultValue = SleepGuard.Mode.manual
+            guard let config = self.config else { return defaultValue }
+            var v: UnsafePointer<Int8>?
+            let key = "sleep-guard-mode"
+            guard ghostty_config_get(config, &v, key, UInt(key.lengthOfBytes(using: .utf8))) else { return defaultValue }
+            guard let ptr = v else { return defaultValue }
+            return SleepGuard.Mode(rawValue: String(cString: ptr)) ?? defaultValue
+        }
+
+        /// `sleep-guard-grace`, in seconds. The C API reports durations in milliseconds.
+        var sleepGuardGrace: TimeInterval {
+            let defaultValue: TimeInterval = 120
+            guard let config = self.config else { return defaultValue }
+            var v: UInt = 0
+            let key = "sleep-guard-grace"
+            guard ghostty_config_get(config, &v, key, UInt(key.lengthOfBytes(using: .utf8))) else { return defaultValue }
+            return TimeInterval(v) / 1000
+        }
+
         var autoUpdate: AutoUpdate? {
             guard let config = self.config else { return nil }
             var v: UnsafePointer<Int8>?
