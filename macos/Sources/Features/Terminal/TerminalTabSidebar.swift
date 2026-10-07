@@ -435,6 +435,7 @@ struct TerminalTabSidebarLayout<Content: View>: View {
                     .frame(width: isCollapsed ? TerminalTabSidebar.collapsedWidth : width)
                     .background(ghostty.config.backgroundColor.opacity(ghostty.config.backgroundOpacity))
                     .environment(\.colorScheme, NSColor(ghostty.config.backgroundColor).isLightColor ? .light : .dark)
+                    .environment(\.terminalTabSidebarPalette, TerminalTabSidebarPalette(ansi: ghostty.config.ansiPalette))
 
                 divider
             }
@@ -691,6 +692,7 @@ private struct TerminalTabSidebarRow: View {
     /// stronger fill to stand out.
     var isInGroup = false
 
+    @Environment(\.terminalTabSidebarPalette) private var palette
     @State private var isHovering = false
 
     var body: some View {
@@ -731,7 +733,7 @@ private struct TerminalTabSidebarRow: View {
             .font(.system(size: 11))
             .frame(width: 30, height: 30)
             .overlay(alignment: .topTrailing) {
-                if let color = tab.color.displayColor {
+                if let color = palette.color(for: tab.color) {
                     Circle()
                         .fill(Color(nsColor: color))
                         .frame(width: 6, height: 6)
@@ -749,7 +751,7 @@ private struct TerminalTabSidebarRow: View {
                     TerminalTabSidebarButton(systemName: "xmark", label: "Close Tab", kind: .close) {
                         model.close(tab)
                     }
-                } else if let color = tab.color.displayColor {
+                } else if let color = palette.color(for: tab.color) {
                     Circle()
                         .fill(Color(nsColor: color))
                         .frame(width: 8, height: 8)
@@ -784,6 +786,7 @@ private struct TerminalTabSidebarGroup: View {
     let isCompact: Bool
 
     @Environment(\.colorScheme) private var colorScheme
+    @Environment(\.terminalTabSidebarPalette) private var palette
 
     var body: some View {
         VStack(spacing: 0) {
@@ -881,18 +884,18 @@ private struct TerminalTabSidebarGroup: View {
     /// Graphite (and no color) groups are drawn neutral: a gray name on a gray fill would be
     /// as hard to read as the captions this is meant to replace.
     private var isNeutral: Bool {
-        group.color == .graphite || group.color.displayColor == nil
+        group.color == .graphite || palette.color(for: group.color) == nil
     }
 
     private var accentColor: Color {
-        guard !isNeutral, let color = group.color.displayColor else { return Color.primary.opacity(0.5) }
+        guard !isNeutral, let color = palette.color(for: group.color) else { return Color.primary.opacity(0.5) }
         return Color(nsColor: color)
     }
 
     /// The group color, lightened on dark backgrounds and darkened on light ones so the
     /// name stays readable on the container's tint.
     private var nameColor: Color {
-        guard !isNeutral, let color = group.color.displayColor else { return Color.primary.opacity(0.9) }
+        guard !isNeutral, let color = palette.color(for: group.color) else { return Color.primary.opacity(0.9) }
         let toward: NSColor = colorScheme == .dark ? .white : .black
         return Color(nsColor: color.blended(withFraction: 0.3, of: toward) ?? color)
     }
@@ -939,5 +942,43 @@ private struct TerminalTabSidebarMenuArea: NSViewRepresentable {
         override func menu(for event: NSEvent) -> NSMenu? {
             menuProvider?()
         }
+    }
+}
+
+/// Resolves tab and group colors to the terminal theme's ANSI colors, so the sidebar's
+/// colors change with the theme. Without a palette it falls back to the system colors.
+struct TerminalTabSidebarPalette {
+    private let ansi: [NSColor]
+
+    init(ansi: [Color] = []) {
+        self.ansi = ansi.map { NSColor($0).usingColorSpace(.sRGB) ?? NSColor($0) }
+    }
+
+    func color(for tabColor: TerminalTabColor) -> NSColor? {
+        guard ansi.count >= 16 else { return tabColor.displayColor }
+        switch tabColor {
+        case .none: return nil
+        case .red: return ansi[1]
+        case .green: return ansi[2]
+        case .yellow: return ansi[3]
+        case .blue: return ansi[4]
+        case .purple: return ansi[5]
+        case .teal: return ansi[6]
+        case .pink: return ansi[13]
+        // Terminal palettes have no orange, so mix the theme's red and yellow.
+        case .orange: return ansi[1].blended(withFraction: 0.5, of: ansi[3]) ?? ansi[1]
+        case .graphite: return ansi[8]
+        }
+    }
+}
+
+private struct TerminalTabSidebarPaletteKey: EnvironmentKey {
+    static let defaultValue = TerminalTabSidebarPalette()
+}
+
+extension EnvironmentValues {
+    var terminalTabSidebarPalette: TerminalTabSidebarPalette {
+        get { self[TerminalTabSidebarPaletteKey.self] }
+        set { self[TerminalTabSidebarPaletteKey.self] = newValue }
     }
 }

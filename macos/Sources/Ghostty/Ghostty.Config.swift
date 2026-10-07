@@ -487,6 +487,24 @@ extension Ghostty {
             )
         }
 
+        /// The first 16 colors of the terminal palette (the ANSI colors), as set by the
+        /// theme and any `palette` lines. Empty when the config can't be read.
+        var ansiPalette: [Color] {
+            guard let config = self.config else { return [] }
+            var palette = ghostty_config_palette_s()
+            let key = "palette"
+            guard ghostty_config_get(config, &palette, key, UInt(key.lengthOfBytes(using: .utf8))) else { return [] }
+            return withUnsafeBytes(of: palette.colors) { raw in
+                raw.bindMemory(to: ghostty_config_color_s.self).prefix(16).map { color in
+                    Color(
+                        red: Double(color.r) / 255,
+                        green: Double(color.g) / 255,
+                        blue: Double(color.b) / 255
+                    )
+                }
+            }
+        }
+
         var backgroundOpacity: Double {
             guard let config = self.config else { return 1 }
             var v: Double = 1
