@@ -18,15 +18,12 @@ identifier=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$info")
 revision=$(/usr/libexec/PlistBuddy -c 'Print :GhosttyForkRevision' "$info")
 [[ -n "$revision" ]] || { echo 'Missing embedded source revision.' >&2; exit 1; }
 /usr/bin/codesign --verify --strict "$source_app"
-[[ -d "$installed_app" ]] || { echo 'Missing existing installed bundle to back up.' >&2; exit 1; }
+[[ -d "$installed_app" ]] || { echo 'Missing existing installed bundle.' >&2; exit 1; }
 active_identifier=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$active_app/Contents/Info.plist")
-[[ "$active_identifier" == com.mitchellh.ghostty ]] || { echo 'Active backup must have canonical daily identity.' >&2; exit 1; }
-printf 'Candidate: %s\nRevision: %s\nStage: %s\nInstalled backup source: %s\nActive backup source: %s\n' "$source_app" "$revision" "$destination" "$installed_app" "$active_app"
+[[ "$active_identifier" == com.mitchellh.ghostty ]] || { echo 'Active bundle must have canonical daily identity.' >&2; exit 1; }
+printf 'Candidate: %s\nRevision: %s\nStage: %s\nInstalled bundle: %s\nActive bundle: %s\n' "$source_app" "$revision" "$destination" "$installed_app" "$active_app"
 if [[ "$mode" == dry-run ]]; then exit; fi
-mkdir -p "$destination/candidate" "$destination/previous-installed" "$destination/previous-active" "$destination/state" "$destination/receipts"
-/usr/bin/ditto -c -k --sequesterRsrc --keepParent "$source_app" "$destination/candidate/Ghostty.app.zip"
-/usr/bin/ditto -c -k --sequesterRsrc --keepParent "$installed_app" "$destination/previous-installed/Ghostty.app.zip"
-/usr/bin/ditto -c -k --sequesterRsrc --keepParent "$active_app" "$destination/previous-active/Ghostty.app.zip"
+mkdir -p "$destination/state" "$destination/receipts"
 python3 - "$source_app" "$active_app" "$installed_app" "$revision" "$destination" <<'MANIFEST'
 import datetime, hashlib, json, pathlib, sys
 candidate, active, installed, revision, destination = sys.argv[1:]
@@ -34,11 +31,11 @@ def identity(path):
     executable = pathlib.Path(path)/'Contents/MacOS/ghostty'
     return {'source_path': path, 'executable_sha256': hashlib.sha256(executable.read_bytes()).hexdigest()}
 manifest = {'prepared_at_utc': datetime.datetime.now(datetime.timezone.utc).isoformat(),
-            'candidate': dict(identity(candidate), revision=revision, backup='candidate/Ghostty.app.zip', archive_format='ditto-zip'),
-            'previous_active': dict(identity(active), backup='previous-active/Ghostty.app.zip', archive_format='ditto-zip'),
-            'previous_installed': dict(identity(installed), backup='previous-installed/Ghostty.app.zip', archive_format='ditto-zip'),
+            'candidate': dict(identity(candidate), revision=revision),
+            'previous_active': identity(active),
+            'previous_installed': identity(installed),
             'canonical_target': '/Applications/Ghostty.app',
-            'rollback_launch_path': active, 'preliminary_state_only': True}
+            'preliminary_state_only': True}
 (pathlib.Path(destination)/'transaction.json').write_text(json.dumps(manifest, indent=2) + '\n')
 MANIFEST
 /usr/bin/codesign -d -r- --verbose=2 "$active_app" 2> "$destination/receipts/previous-active-signature.txt"
@@ -56,65 +53,40 @@ for item in "$snapshot_home/Library/Application Support/com.mitchellh.ghostty" \
         /usr/bin/ditto "$item" "$destination/state/$name"
     fi
 done
-/usr/bin/unzip -tq "$destination/candidate/Ghostty.app.zip"
-cat > "$destination/INSTALL-AND-ROLLBACK.txt" <<'PLAN'
-Prepared only; no installation or app/process/job/permission changes have occurred.
-Read transaction.json: candidate, previous-active and previous-installed are distinct ZIP
-archives. Staging creates no runnable app copies, even if preparation fails.
-Extract with ditto -x -k ARCHIVE NEW_DIRECTORY; the preserved bundle keeps its original
-basename. Verify its executable hash against transaction.json and codesign --verify
---deep before restoration. Finder custom-icon metadata added after launch can fail strict
-verification; preserve that metadata. Strict verification still applies to the unlaunched
-candidate. Keep extracted rollback apps temporary and unregister their
-exact paths after use; runnable production-ID backups can confuse permission relaunch.
-1. Obtain authorization for the controlled daily quit/relaunch. Capture actual active
-   executable/PID/birth, window/surface/session/cwd mapping and recovery receipt. Confirm
-   this matches previous_active.source_path, not merely a matching bundle ID. Pause
-   automated actions and preserve the exact prior config/preferences/job definitions.
-2. Quit the actual active app gracefully by absolute path. Verify every canonical-ID
-   Ghostty process stopped, not only that /Applications has no process. Inspect original
-   relaunch job; unload only the exact daily watcher labels if necessary to prevent an old
-   watcher reopening the original path. Do not unload a sleep recovery watcher while its
-   lease or in-flight mutation remains. Verify sleep ownership released to its initial
-   state. Refresh config/preferences/saved-state/recovery backups AFTER quit into a new
-   post-quit snapshot; never overwrite preliminary evidence.
-3. Extract candidate/Ghostty.app.zip into a new temporary directory on /Applications
-   volume, then move its bundle to /Applications/.Ghostty-staged.app. Verify canonical ID,
-   strict signature, source stamp and hash before replacement. On any failure, unregister
-   and remove only the exact temporary extracted/staged app paths; retain the ZIP archives
-   and diagnostics. Rename existing installed bundle
-   aside only for the atomic exchange, then staged to /Applications/Ghostty.app. Archive
-   the inactive displaced bundle with ditto -c -k --sequesterRsrc --keepParent and verify
-   an independent extraction before removing that runnable copy. Preserve both ZIP
-   backups. Preserve the original active artifact in a verified archive before removing
-   its inactive runnable duplicate. Repository source files remain untouched.
-4. Narrow LaunchServices operations: unregister the now-inactive original active bundle
-   path if it differs from the canonical target and each exact inactive production-ID
-   candidate/backup path, then force-register the new canonical target. Verify bundle-ID
-   resolution selects /Applications/Ghostty.app. Unregister and remove the exact temporary
-   extracted app paths after use, on success or failure, preserving the ZIP archives.
-   Do not reset LaunchServices or TCC. Redirect inspected login/Dock/automation references
-   to canonical /Applications path only when they currently target the original bundle.
-   Keep a before/after reference manifest so rollback can restore those exact entries.
-5. Open canonical /Applications/Ghostty.app once, without open -n. Re-enumerate actual
-   executable paths and require exactly one daily instance with the candidate stamp/hash.
-   Verify restored surface/session/cwd mapping and no duplicate sessions before resuming
-   automatic actions. New relaunch watcher must name canonical bundle and current birth.
-   After every permission-driven relaunch, repeat path/revision/mapping checks.
-6. Ad-hoc signatures may have code-hash-based designated requirements. Retaining the ID
-   and path does not guarantee permission continuity. Record old/candidate requirements;
-   permit explicit user grants if requested, and stop for an unexpected bundle identity.
-   Do not clear permission databases or silently change signing requirements. A stable
-   trusted signing identity is a separate provisioned setup, not an ad-hoc promise.
-7. On failure: quit new canonical app gracefully, verify no daily process/late mutation,
-   preserve new diagnostics/state, unload only new relaunch watcher, restore previous-
-   installed artifact to /Applications, restore the changed launch reference registrations,
-   then restore the previous-active archive to previous_active.source_path if that path
-   was removed: extract into a new directory, verify its recorded hash and deep signature,
-   and preserve any newer artifact at that path before restoring. Register/open that exact
-   recorded path once. This is the rollback runtime; the older installed app is NOT
-   assumed to be the app that was running. Verify its hash and session associations.
-   Restore old config/preferences/state only after reviewing newer work and authorization;
-   never overwrite fresh session activity automatically.
+cat > "$destination/INSTALL.txt" <<'PLAN'
+Prepared only; no application copies, installation, process, job or permission changes.
+transaction.json records the one build output and the existing active/installed identities.
+Git preserves source versions. This directory contains receipts and preliminary state,
+not application backups. Do not retain candidates or rollback bundles here.
+1. Obtain authorization for the daily quit/relaunch. Capture actual executable/PID/birth,
+   window/surface/session/cwd mapping and recovery receipt. Match previous_active.source_path.
+   Require the active runtime to be /Applications/Ghostty.app and match previous_installed
+   before this canonical exchange. If it differs, stop and resolve that path explicitly;
+   the displaced installed app is not assumed to be the previous runtime.
+   Pause automated actions; inspect exact relaunch and sleep-recovery watcher ownership.
+2. Quit gracefully and verify all production-ID Ghostty processes stopped and sleep
+   ownership released. Stop only the exact relevant watcher labels when safe. Refresh
+   config/preferences/saved-state/recovery snapshots after quit; retain preliminary evidence.
+3. Reverify candidate.source_path against its recorded stamp/hash and strict signature.
+   Copy that single build output to a newly created temporary directory on /Applications
+   volume. Verify the copied bundle's ID, strict signature, stamp and executable hash.
+   Rename /Applications/Ghostty.app aside temporarily for the same-volume exchange, then
+   move the verified bundle to /Applications/Ghostty.app. If exchange fails, restore the
+   displaced bundle immediately. Never overwrite an unexpected path or newer artifact.
+4. Force-register canonical /Applications/Ghostty.app and launch that exact path once.
+   Verify exactly one daily process, stamp/hash and restored surface/session associations.
+   If acceptance fails, quit the new app gracefully, preserve diagnostics and fresh state,
+   verify no late mutation, restore the displaced bundle and its exact launch references,
+   register/open the prior runtime once, and verify identity and associations.
+5. On success or failure, unregister each exact inactive temporary/displaced app path and
+   remove its owned temporary copy/directory after the required restore or acceptance.
+   Never leave runnable app copies or ZIP backups. Remove the inactive build output after
+   successful installation. Do not remove an active runtime or reset LaunchServices/TCC.
+   Redirect only inspected references that pointed to the previous active path. Verify
+   bundle-ID resolution and permission-driven relaunch select /Applications/Ghostty.app.
+6. After the temporary exchange has finished, returning to older code means checking out
+   its Git revision and rebuilding the single build output, then repeating this procedure.
+   Review newer config/session changes before restoring any state snapshot. Ad-hoc signing
+   cannot promise permission continuity; record requirements and allow explicit user grants.
 PLAN
-printf 'Prepared. Read %s/INSTALL-AND-ROLLBACK.txt before any daily changes.\n' "$destination"
+printf 'Prepared. Read %s/INSTALL.txt before any daily changes.\n' "$destination"

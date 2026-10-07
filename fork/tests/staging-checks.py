@@ -23,20 +23,17 @@ with tempfile.TemporaryDirectory(prefix='ghostty-staging-') as tmp:
     subprocess.run([helper, 'dry-run', str(candidate), str(destination)], env=environment, check=True, capture_output=True)
     assert not destination.exists(), 'dry-run must create no stage or backups'
     subprocess.run([helper, 'prepare', str(candidate), str(destination)], env=environment, check=True, capture_output=True)
-    import zipfile
-    def archived_revision(relative, basename):
-        with zipfile.ZipFile(destination/relative) as archive:
-            return plistlib.loads(archive.read(basename + '/Contents/Info.plist'))['GhosttyForkRevision']
-    assert archived_revision('candidate/Ghostty.app.zip', 'Candidate.app') == 'candidate-fixture'
     assert not list(destination.rglob('*.app')), 'staging must retain no runnable app copies'
-    assert archived_revision('previous-installed/Ghostty.app.zip', 'Installed.app') == 'previous-installed-fixture'
+    assert not list(destination.rglob('*.zip')), 'staging must retain no application archives'
     assert any(p.read_text() == 'fixture-state\n' for p in (destination/'state').rglob('config.ghostty'))
-    assert archived_revision('previous-active/Ghostty.app.zip', 'Active.app') == 'previous-active-fixture'
     import json
     mapping = json.loads((destination/'transaction.json').read_text())
-    assert mapping['rollback_launch_path'] == str(active)
-    assert (destination/'INSTALL-AND-ROLLBACK.txt').exists()
+    assert mapping['candidate']['source_path'] == str(candidate)
+    assert mapping['previous_active']['source_path'] == str(active)
+    assert mapping['previous_installed']['source_path'] == str(installed)
+    assert all('backup' not in mapping[key] for key in ('candidate', 'previous_active', 'previous_installed'))
+    assert (destination/'INSTALL.txt').exists()
     duplicate = subprocess.run([helper, 'prepare', str(candidate), str(destination)], env=environment, capture_output=True)
-    assert duplicate.returncode != 0, 'existing backups must not be overwritten'
+    assert duplicate.returncode != 0, 'existing receipts must not be overwritten'
     assert config.read_text() == 'fixture-state\n', 'preparation must not alter source state'
-print('Staging dry-run/prepare/backup checks passed (signed inert fixtures only)')
+print('Staging dry-run/prepare/receipt checks passed (signed inert fixtures only)')
