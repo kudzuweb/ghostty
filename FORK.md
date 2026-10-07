@@ -155,6 +155,13 @@ The check reports a new upstream minor or major release and never downloads or i
 | Settings panel | A "Release check" section has the toggle, the base version, the last check time and a "Check now" button, which ignores the weekly throttle and any dismissal. |
 | Limits | Unauthenticated GitHub allows 60 requests per hour per IP, far above the use here. The pill is a Sparkle-coupled view, so the new state is a small addition to upstream files (`UpdateViewModel.swift`, `UpdatePopoverView.swift`), which a merge may need to reconcile. |
 
+### Agent environment stripping
+| Item | Detail |
+|---|---|
+| What it does | `Ghostty.stripAgentEnvironment()` in `macos/Sources/Ghostty/Ghostty.AgentEnvironment.swift` runs first in `macos/Sources/App/macOS/main.swift`, before `ghostty_init`, so no surface or pty sees the variables. It calls `unsetenv` and logs one line of names, never values. |
+| Names removed | Every name starting with `CLAUDE` (which covers `CLAUDECODE` and `CLAUDE_*`), `CODEX_THREAD_ID`, `CODEX_SESSION_ID`, and names starting with `CODEX_SANDBOX` or `CODEX_MANAGED_`. User-configured names such as `CODEX_HOME` stay. |
+| Why settings-derived variables go too | Claude Code re-reads its settings when it starts, so a `claude` in a new tab still gets them. |
+
 ### Backports from upstream
 
 These came in so the foreground process id and tty could exist. Each is in upstream's development branch and will arrive in a later release, where a merge may show them as already applied.
@@ -219,6 +226,7 @@ Both launchers address `/Applications/Ghostty.app` by absolute path.
 | Gotcha | What to do |
 |---|---|
 | A test Ghostty launched from inside a Claude Code session inherits the `CLAUDE*` environment variables, and a `claude` started in it never registers its session. | Strip every `CLAUDE*` variable when launching a test build. |
+| An app launched from inside a Claude Code or Codex session (for example `open Ghostty.app` from an agent's shell) inherits that session's identity variables, and every tab's shell passes them on, so a `claude` in a tab shows "Transcript saving is off" and never registers its session. | The app strips them at launch (see Agent environment stripping), so no manual stripping is needed for test builds. |
 | An interrupted `zig build` leaves `macos/GhosttyKit.xcframework`, which breaks the next build with code 70. | Delete that folder and rebuild. |
 | The clone is a blob-less partial clone, and a stale commit graph broke history searches. | Delete `.git/objects/info/commit-graph*`. |
 | AppleScript `input text` pastes without running the line. | Follow it with `send key "enter"`, or use a surface configuration's `initial input`. |
