@@ -25,8 +25,8 @@ printf 'Candidate: %s\nRevision: %s\nStage: %s\nInstalled backup source: %s\nAct
 if [[ "$mode" == dry-run ]]; then exit; fi
 mkdir -p "$destination/candidate" "$destination/previous-installed" "$destination/previous-active" "$destination/state" "$destination/receipts"
 /usr/bin/ditto "$source_app" "$destination/candidate/Ghostty.app"
-/usr/bin/ditto "$installed_app" "$destination/previous-installed/Ghostty.app"
-/usr/bin/ditto "$active_app" "$destination/previous-active/Ghostty.app"
+/usr/bin/ditto -c -k --sequesterRsrc --keepParent "$installed_app" "$destination/previous-installed/Ghostty.app.zip"
+/usr/bin/ditto -c -k --sequesterRsrc --keepParent "$active_app" "$destination/previous-active/Ghostty.app.zip"
 python3 - "$source_app" "$active_app" "$installed_app" "$revision" "$destination" <<'MANIFEST'
 import datetime, hashlib, json, pathlib, sys
 candidate, active, installed, revision, destination = sys.argv[1:]
@@ -35,8 +35,8 @@ def identity(path):
     return {'source_path': path, 'executable_sha256': hashlib.sha256(executable.read_bytes()).hexdigest()}
 manifest = {'prepared_at_utc': datetime.datetime.now(datetime.timezone.utc).isoformat(),
             'candidate': dict(identity(candidate), revision=revision, backup='candidate/Ghostty.app'),
-            'previous_active': dict(identity(active), backup='previous-active/Ghostty.app'),
-            'previous_installed': dict(identity(installed), backup='previous-installed/Ghostty.app'),
+            'previous_active': dict(identity(active), backup='previous-active/Ghostty.app.zip', archive_format='ditto-zip'),
+            'previous_installed': dict(identity(installed), backup='previous-installed/Ghostty.app.zip', archive_format='ditto-zip'),
             'canonical_target': '/Applications/Ghostty.app',
             'rollback_launch_path': active, 'preliminary_state_only': True}
 (pathlib.Path(destination)/'transaction.json').write_text(json.dumps(manifest, indent=2) + '\n')
@@ -59,7 +59,13 @@ done
 /usr/bin/codesign --verify --strict "$destination/candidate/Ghostty.app"
 cat > "$destination/INSTALL-AND-ROLLBACK.txt" <<'PLAN'
 Prepared only; no installation or app/process/job/permission changes have occurred.
-Read transaction.json: previous-active and previous-installed are distinct artifacts.
+Read transaction.json: previous-active and previous-installed are distinct ZIP archives.
+Extract with ditto -x -k ARCHIVE NEW_DIRECTORY; the preserved bundle keeps its original
+basename. Verify its executable hash against transaction.json and codesign --verify
+--deep before restoration. Finder custom-icon metadata added after launch can fail strict
+verification; preserve that metadata. Strict verification still applies to the unlaunched
+candidate. Keep extracted rollback apps temporary and unregister their
+exact paths after use; runnable production-ID backups can confuse permission relaunch.
 1. Obtain authorization for the controlled daily quit/relaunch. Capture actual active
    executable/PID/birth, window/surface/session/cwd mapping and recovery receipt. Confirm
    this matches previous_active.source_path, not merely a matching bundle ID. Pause
@@ -73,10 +79,16 @@ Read transaction.json: previous-active and previous-installed are distinct artif
    post-quit snapshot; never overwrite preliminary evidence.
 3. Copy candidate/Ghostty.app to /Applications/.Ghostty-staged.app on that same volume;
    verify canonical ID, signature, source stamp and hash. Rename existing installed bundle
-   aside, then staged to /Applications/Ghostty.app. Preserve both previous-installed and
-   previous-active backups. Do not replace the original active repo bundle or its sources.
+   aside only for the atomic exchange, then staged to /Applications/Ghostty.app. Archive
+   the inactive displaced bundle with ditto -c -k --sequesterRsrc --keepParent and verify
+   an independent extraction before removing that runnable copy. Preserve both ZIP
+   backups. Preserve the original active artifact in a verified archive before removing
+   its inactive runnable duplicate. Repository source files remain untouched.
 4. Narrow LaunchServices operations: unregister the now-inactive original active bundle
-   path if it differs from the canonical target, then register the new canonical target.
+   path if it differs from the canonical target and each exact inactive production-ID
+   candidate/backup path, then force-register the new canonical target. Verify bundle-ID
+   resolution selects /Applications/Ghostty.app. Archive inactive candidate copies after
+   successful installation so they cannot be rediscovered as competing applications.
    Do not reset LaunchServices or TCC. Redirect inspected login/Dock/automation references
    to canonical /Applications path only when they currently target the original bundle.
    Keep a before/after reference manifest so rollback can restore those exact entries.
@@ -93,9 +105,11 @@ Read transaction.json: previous-active and previous-installed are distinct artif
 7. On failure: quit new canonical app gracefully, verify no daily process/late mutation,
    preserve new diagnostics/state, unload only new relaunch watcher, restore previous-
    installed artifact to /Applications, restore the changed launch reference registrations,
-   then register/open previous_active.source_path once. That path (or its restored exact
-   previous-active artifact if damaged) is the rollback runtime; the older installed app
-   is NOT assumed to be the app that was running. Verify its hash and session associations.
+   then restore the previous-active archive to previous_active.source_path if that path
+   was removed: extract into a new directory, verify its recorded hash and deep signature,
+   and preserve any newer artifact at that path before restoring. Register/open that exact
+   recorded path once. This is the rollback runtime; the older installed app is NOT
+   assumed to be the app that was running. Verify its hash and session associations.
    Restore old config/preferences/state only after reviewing newer work and authorization;
    never overwrite fresh session activity automatically.
 PLAN

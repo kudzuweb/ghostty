@@ -24,9 +24,13 @@ with tempfile.TemporaryDirectory(prefix='ghostty-staging-') as tmp:
     assert not destination.exists(), 'dry-run must create no stage or backups'
     subprocess.run([helper, 'prepare', str(candidate), str(destination)], env=environment, check=True, capture_output=True)
     assert plistlib.loads((destination/'candidate/Ghostty.app/Contents/Info.plist').read_bytes())['GhosttyForkRevision'] == 'candidate-fixture'
-    assert plistlib.loads((destination/'previous-installed/Ghostty.app/Contents/Info.plist').read_bytes())['GhosttyForkRevision'] == 'previous-installed-fixture'
+    import zipfile
+    def archived_revision(relative, basename):
+        with zipfile.ZipFile(destination/relative) as archive:
+            return plistlib.loads(archive.read(basename + '/Contents/Info.plist'))['GhosttyForkRevision']
+    assert archived_revision('previous-installed/Ghostty.app.zip', 'Installed.app') == 'previous-installed-fixture'
     assert any(p.read_text() == 'fixture-state\n' for p in (destination/'state').rglob('config.ghostty'))
-    assert plistlib.loads((destination/'previous-active/Ghostty.app/Contents/Info.plist').read_bytes())['GhosttyForkRevision'] == 'previous-active-fixture'
+    assert archived_revision('previous-active/Ghostty.app.zip', 'Active.app') == 'previous-active-fixture'
     import json
     mapping = json.loads((destination/'transaction.json').read_text())
     assert mapping['rollback_launch_path'] == str(active)
