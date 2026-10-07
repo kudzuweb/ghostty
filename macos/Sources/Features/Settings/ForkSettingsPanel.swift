@@ -59,6 +59,8 @@ private struct ForkSettingsView: View {
                     KeepAliveSection()
                     Divider()
                     UsageCutoffSection()
+                    Divider()
+                    ReleaseCheckSection()
                 }
                 .padding(20)
             }
@@ -439,6 +441,58 @@ private struct UsageCutoffSection: View {
 }
 
 // MARK: Footer
+
+// MARK: Release check
+
+private struct ReleaseCheckSection: View {
+    @ObservedObject private var check = ReleaseCheck.shared
+    @State private var enabled = ReleaseCheck.shared.enabled
+    @State private var errorMessage: String?
+
+    private var lastCheckText: String {
+        guard let date = check.lastCheck else { return "never" }
+        return date.formatted(date: .abbreviated, time: .shortened)
+    }
+
+    private var statusText: String? {
+        switch check.status {
+        case .idle: return nil
+        case .checking: return "Checking..."
+        case .upToDate: return "No new minor release."
+        case .available(let version): return "Ghostty \(version.description) is out."
+        case .failed: return "Couldn't reach GitHub. It will retry later."
+        }
+    }
+
+    var body: some View {
+        ForkSettingsSection(title: "Release check") {
+            Toggle("Check weekly for a new Ghostty release", isOn: Binding(
+                get: { enabled },
+                set: {
+                    enabled = $0
+                    errorMessage = ConfigFile.set("release-check", to: $0 ? "true" : "false", underForkHeader: true)
+                }
+            ))
+            Text("Reports a new minor or major upstream release, never a patch, as a pill and a notification "
+                + "that link to the release. Nothing is downloaded or installed.")
+                .font(.caption).foregroundStyle(.secondary)
+
+            LabeledContent("Base version", value: "Ghostty \(check.base.description)")
+            LabeledContent("Last checked", value: lastCheckText)
+
+            HStack {
+                Button("Check now") { check.checkNow() }
+                    .disabled(!enabled || check.status == .checking)
+                if let statusText {
+                    Text(statusText).font(.caption).foregroundStyle(.secondary)
+                }
+            }
+            if let errorMessage {
+                Text(errorMessage).font(.caption).foregroundStyle(.red)
+            }
+        }
+    }
+}
 
 private struct FooterBar: View {
     private static let forkNotes = URL(string: "https://github.com/kudzuweb/ghostty/blob/main/FORK.md")

@@ -763,6 +763,7 @@ class AppDelegate: NSObject,
         MainActor.assumeIsolated {
             SleepGuard.shared.apply(config)
             KeepAlive.shared.apply(config)
+            ReleaseCheck.shared.apply(enabled: config.releaseCheck)
         }
 
         // Update the config we need to store
@@ -911,7 +912,12 @@ class AppDelegate: NSObject,
         didReceive: UNNotificationResponse,
         withCompletionHandler: () -> Void
     ) {
-        ghostty.handleUserNotification(response: didReceive)
+        if let link = didReceive.notification.request.content.userInfo[ReleaseCheck.releaseURLKey] as? String,
+           let url = URL(string: link), url.scheme == "https" {
+            NSWorkspace.shared.open(url)
+        } else {
+            ghostty.handleUserNotification(response: didReceive)
+        }
         withCompletionHandler()
     }
 

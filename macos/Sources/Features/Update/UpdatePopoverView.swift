@@ -46,6 +46,9 @@ struct UpdatePopoverView: View {
 
             case .error(let error):
                 UpdateErrorView(error: error, dismiss: dismiss)
+
+            case .releaseAvailable(let release):
+                ReleaseAvailableView(release: release, dismiss: dismiss)
             }
         }
         .frame(width: 300)
@@ -379,6 +382,44 @@ private struct UpdateErrorView: View {
                     dismiss()
                 }
                 .keyboardShortcut(.defaultAction)
+                .controlSize(.small)
+            }
+        }
+        .padding(16)
+    }
+}
+
+private struct ReleaseAvailableView: View {
+    let release: UpdateState.ReleaseAvailable
+    let dismiss: DismissAction
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            VStack(alignment: .leading, spacing: 8) {
+                Text("Ghostty \(release.version) is out")
+                    .font(.system(size: 13, weight: .semibold))
+
+                Text("This fork is based on Ghostty \(ForkBase.version). Nothing is downloaded or installed.")
+                    .font(.system(size: 11))
+                    .foregroundColor(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
+            HStack(spacing: 8) {
+                Button("Not Now") {
+                    release.dismiss()
+                    dismiss()
+                }
+                .keyboardShortcut(.cancelAction)
+
+                Spacer()
+
+                Button("View Release") {
+                    NSWorkspace.shared.open(release.url)
+                    dismiss()
+                }
+                .keyboardShortcut(.defaultAction)
+                .buttonStyle(.borderedProminent)
                 .controlSize(.small)
             }
         }

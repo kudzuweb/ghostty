@@ -157,6 +157,22 @@ enum UsageCutoff {
         return .clear
     }
 
+    /// Whether failed background sessions are held back from respawning: the cutoff applies
+    /// to them (`usage-cutoff` or the overnight switch is on) and it has been reached, which
+    /// holds until the workday starts even if a later computation moves the cutoff.
+    static func holdsRespawn(
+        applies: Bool,
+        cutoff: Date?,
+        now: Date,
+        reachedWorkday: Date?,
+        workday: Date
+    ) -> Bool {
+        guard applies else { return false }
+        if reachedWorkday == workday { return true }
+        guard let cutoff else { return false }
+        return now >= cutoff
+    }
+
     /// The wrap-up prompt typed into an idle Claude Code session in the warning window.
     static func wrapUpPrompt(cutoff: Date, calendar: Calendar = .current) -> String {
         let formatter = DateFormatter()

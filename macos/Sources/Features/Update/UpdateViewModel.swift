@@ -36,6 +36,8 @@ class UpdateViewModel: ObservableObject {
             return "No Updates Available"
         case .error(let err):
             return err.error.localizedDescription
+        case .releaseAvailable(let release):
+            return "Ghostty \(release.version) is out"
         }
     }
 
@@ -73,6 +75,8 @@ class UpdateViewModel: ObservableObject {
             return "info.circle"
         case .error:
             return "exclamationmark.triangle.fill"
+        case .releaseAvailable:
+            return "gift.fill"
         }
     }
 
@@ -98,6 +102,8 @@ class UpdateViewModel: ObservableObject {
             return "You are running the latest version"
         case .error:
             return "An error occurred during the update process"
+        case .releaseAvailable:
+            return "A new Ghostty release is available upstream"
         }
     }
 
@@ -130,7 +136,7 @@ class UpdateViewModel: ObservableObject {
             return .white
         case .checking:
             return .secondary
-        case .updateAvailable:
+        case .updateAvailable, .releaseAvailable:
             return .accentColor
         case .downloading, .extracting, .installing:
             return .secondary
@@ -146,7 +152,7 @@ class UpdateViewModel: ObservableObject {
         switch state {
         case .permissionRequest:
             return Color(nsColor: NSColor.systemBlue.blended(withFraction: 0.3, of: .black) ?? .systemBlue)
-        case .updateAvailable:
+        case .updateAvailable, .releaseAvailable:
             return .accentColor
         case .notFound:
             return Color(nsColor: NSColor.systemBlue.blended(withFraction: 0.5, of: .black) ?? .systemBlue)
@@ -162,7 +168,7 @@ class UpdateViewModel: ObservableObject {
         switch state {
         case .permissionRequest:
             return .white
-        case .updateAvailable:
+        case .updateAvailable, .releaseAvailable:
             return .white
         case .notFound:
             return .white
@@ -184,9 +190,17 @@ enum UpdateState: Equatable {
     case downloading(Downloading)
     case extracting(Extracting)
     case installing(Installing)
+    /// The fork's release check found a new upstream minor release. It only links to the
+    /// release page; nothing is downloaded or installed.
+    case releaseAvailable(ReleaseAvailable)
 
     var isIdle: Bool {
         if case .idle = self { return true }
+        return false
+    }
+
+    var isReleaseNotice: Bool {
+        if case .releaseAvailable = self { return true }
         return false
     }
 
@@ -254,9 +268,17 @@ enum UpdateState: Equatable {
             return lExt.progress == rExt.progress
         case (.installing(let lInstall), .installing(let rInstall)):
             return lInstall.isAutoUpdate == rInstall.isAutoUpdate
+        case (.releaseAvailable(let lRelease), .releaseAvailable(let rRelease)):
+            return lRelease.version == rRelease.version
         default:
             return false
         }
+    }
+
+    struct ReleaseAvailable {
+        let version: String
+        let url: URL
+        let dismiss: () -> Void
     }
 
     struct NotFound {
