@@ -672,7 +672,7 @@ struct TerminalTabSidebar: View {
 
     private var overnightButton: some View {
         TerminalTabSidebarButton(
-            systemName: keepAlive.overnightActive ? "moon.stars.fill" : "moon.stars",
+            systemName: keepAlive.overnightActive ? "clock.fill" : "clock",
             label: keepAlive.overnightEndDescription.map { "Overnight run: on until \($0). Click to turn off" }
                 ?? "Overnight run: off. Click to turn on"
         ) {
