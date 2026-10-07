@@ -73,6 +73,7 @@ final class ScriptTerminal: NSObject {
     func perform(action: String) -> Bool {
         guard NSApp.isAppleScriptEnabled else { return false }
         guard let surfaceModel = surfaceView?.surfaceModel else { return false }
+        surfaceView?.noteUserInput()
         return surfaceModel.perform(action: action)
     }
 

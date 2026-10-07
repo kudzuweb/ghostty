@@ -49,9 +49,11 @@ final class ReleaseCheck: ObservableObject {
     private let fetchTags: () async throws -> [String]
     private let now: () -> Date
     private let present: @MainActor (Notice?) -> Void
-    private let notify: @MainActor (Notice) -> Void
+    private let notify: @MainActor (Notice, @escaping @MainActor () -> Bool) async -> Bool
     private var timer: Timer?
     private var running = false
+    private var generation = 0
+    private var checkTask: Task<Void, Never>?
 
     init(
         defaults: UserDefaults = .standard,
@@ -59,7 +61,7 @@ final class ReleaseCheck: ObservableObject {
         fetchTags: @escaping () async throws -> [String] = ReleaseCheck.fetchUpstreamTags,
         now: @escaping () -> Date = Date.init,
         present: @escaping @MainActor (Notice?) -> Void = ReleaseCheck.presentInPill,
-        notify: @escaping @MainActor (Notice) -> Void = ReleaseCheck.postNotification
+        notify: @escaping @MainActor (Notice, @escaping @MainActor () -> Bool) async -> Bool = ReleaseCheck.postNotification
     ) {
         self.defaults = defaults
         self.base = base
@@ -75,8 +77,11 @@ final class ReleaseCheck: ObservableObject {
     /// Brings the check in line with `release-check`: on, it shows what an earlier check
     /// found and checks if one is due; off, it clears the pill.
     func apply(enabled: Bool) {
+        if self.enabled != enabled || !enabled { generation += 1 }
         self.enabled = enabled
         guard enabled else {
+            checkTask?.cancel()
+            checkTask = nil
             timer?.invalidate()
             timer = nil
             present(nil)
@@ -84,35 +89,37 @@ final class ReleaseCheck: ObservableObject {
             return
         }
         guard timer == nil else { return }
-        evaluate(announce: false, ignoreDismissal: false)
+        evaluate(ignoreDismissal: false)
         timer = Timer.scheduledTimer(withTimeInterval: 3600, repeats: true) { [weak self] _ in
             Task { @MainActor in await self?.run(force: false) }
         }
-        Task { await run(force: false) }
+        checkTask = Task { await run(force: false) }
     }
 
     // MARK: Checking
 
     /// Checks now, ignoring the weekly throttle and any dismissal.
     func checkNow() {
-        Task { await run(force: true) }
+        checkTask = Task { await run(force: true) }
     }
 
     /// One check: when `force` is false only if one is due. Offline and rate-limit failures
     /// are logged and retried after six hours.
     func run(force: Bool) async {
-        guard enabled, !running else { return }
+        guard enabled || force, !running else { return }
         let started = now()
         guard force || ReleaseCheckLogic.isDue(
             lastCheck: lastCheck, lastAttempt: defaults.object(forKey: Key.lastAttempt) as? Date, now: started
         ) else { return }
 
+        let token = generation
         running = true
         status = .checking
         defaults.set(started, forKey: Key.lastAttempt)
         defer { running = false }
         do {
             let tags = try await fetchTags()
+            guard token == generation, !Task.isCancelled else { return }
             let latest = ReleaseCheckLogic.newestMinorRelease(tagNames: tags, base: base)
             lastCheck = started
             defaults.set(started, forKey: Key.lastCheck)
@@ -122,16 +129,25 @@ final class ReleaseCheck: ObservableObject {
             } else {
                 defaults.removeObject(forKey: Key.latest)
             }
-            evaluate(announce: true, ignoreDismissal: force)
+            evaluate(ignoreDismissal: force)
+            if let latest, ReleaseCheckLogic.isShown(latest: latest, dismissed: defaults.string(forKey: Key.dismissed)),
+               defaults.string(forKey: Key.notified).flatMap(ReleaseVersion.init).map({ latest > $0 }) ?? true {
+                let delivered = await notify(Notice(version: latest), { [weak self] in
+                    self?.generation == token && !Task.isCancelled
+                })
+                if delivered, token == generation, !Task.isCancelled {
+                    defaults.set(latest.tag, forKey: Key.notified)
+                }
+            }
         } catch {
+            guard token == generation, !Task.isCancelled else { return }
             NSLog("ReleaseCheck: the check failed quietly: %@", "\(error)")
             status = .failed
         }
     }
 
-    /// Shows the stored result: the pill if there is a release newer than the dismissed one,
-    /// and, when `announce` is set and this version has not been announced, a notification.
-    private func evaluate(announce: Bool, ignoreDismissal: Bool) {
+    /// Shows a stored release newer than the dismissed one. Notification delivery is awaited by run.
+    private func evaluate(ignoreDismissal: Bool) {
         guard let tag = defaults.string(forKey: Key.latest), let latest = ReleaseVersion(tag),
               latest.isNewMinor(than: base)
         else {
@@ -149,13 +165,7 @@ final class ReleaseCheck: ObservableObject {
         let notice = Notice(version: latest)
         present(notice)
         status = .available(latest)
-        if announce {
-            let announced = defaults.string(forKey: Key.notified).flatMap(ReleaseVersion.init)
-            if announced.map({ latest > $0 }) ?? true {
-                defaults.set(latest.tag, forKey: Key.notified)
-                notify(notice)
-            }
-        }
+
     }
 
     /// Hides the pill until a newer minor release than the one now showing appears.
@@ -177,7 +187,9 @@ final class ReleaseCheck: ObservableObject {
         guard let http = response as? HTTPURLResponse, http.statusCode == 200 else {
             throw URLError(.badServerResponse)
         }
-        return ReleaseCheckLogic.tagNames(fromTagsResponse: data)
+        guard let items = try JSONSerialization.jsonObject(with: data) as? [[String: Any]],
+              items.allSatisfy({ $0["name"] is String }) else { throw URLError(.cannotParseResponse) }
+        return items.compactMap { $0["name"] as? String }
     }
 
     /// Shows or clears the notice on the update pill's view model. A Sparkle state that is
@@ -195,24 +207,21 @@ final class ReleaseCheck: ObservableObject {
         }
     }
 
-    static func postNotification(_ notice: Notice) {
-        NSLog("ReleaseCheck notification: Ghostty %@ is out | %@", notice.version.description, notice.url.absoluteString)
+    static func postNotification(_ notice: Notice, isCurrent: @escaping @MainActor () -> Bool) async -> Bool {
         let center = UNUserNotificationCenter.current()
-        center.requestAuthorization(options: [.alert, .sound]) { _, error in
-            if let error { NSLog("ReleaseCheck: notification authorization failed: %@", "\(error)") }
-        }
-        center.getNotificationSettings { settings in
-            guard settings.authorizationStatus == .authorized else {
-                NSLog("ReleaseCheck: notifications are not authorized, so the notification was not shown")
-                return
-            }
+        do {
+            let granted = try await center.requestAuthorization(options: [.alert, .sound])
+            guard granted, isCurrent() else { return false }
             let content = UNMutableNotificationContent()
             content.title = "Ghostty \(notice.version.description) is out"
             content.body = "Click to open the release page."
             content.sound = .default
             content.userInfo = [releaseURLKey: notice.url.absoluteString]
-            center.add(UNNotificationRequest(identifier: UUID().uuidString, content: content, trigger: nil))
-            NSLog("ReleaseCheck: notification posted")
+            try await center.add(UNNotificationRequest(identifier: UUID().uuidString, content: content, trigger: nil))
+            return true
+        } catch {
+            NSLog("ReleaseCheck: notification was not delivered: %@", "\(error)")
+            return false
         }
     }
 

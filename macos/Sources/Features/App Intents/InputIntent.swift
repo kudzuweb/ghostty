@@ -39,6 +39,7 @@ struct InputTextIntent: AppIntent {
             throw GhosttyIntentError.surfaceNotFound
         }
 
+        terminal.surfaceView?.noteUserInput()
         surface.sendText(text)
         return .result()
     }
@@ -101,6 +102,7 @@ struct KeyEventIntent: AppIntent {
             action: action,
             mods: ghosttyMods
         )
+        terminal.surfaceView?.noteUserInput()
         surface.sendKeyEvent(keyEvent)
 
         return .result()
@@ -165,6 +167,7 @@ struct MouseButtonIntent: AppIntent {
             button: button,
             mods: ghosttyMods
         )
+        terminal.surfaceView?.noteUserInput()
         surface.sendMouseButton(mouseEvent)
 
         return .result()
@@ -228,6 +231,7 @@ struct MousePosIntent: AppIntent {
             y: y,
             mods: ghosttyMods
         )
+        terminal.surfaceView?.noteUserInput()
         surface.sendMousePos(mousePosEvent)
 
         return .result()
@@ -293,6 +297,7 @@ struct MouseScrollIntent: AppIntent {
             y: y,
             mods: .init(precision: precision, momentum: momentum)
         )
+        terminal.surfaceView?.noteUserInput()
         surface.sendMouseScroll(scrollEvent)
 
         return .result()

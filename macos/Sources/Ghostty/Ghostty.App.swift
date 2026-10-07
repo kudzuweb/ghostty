@@ -1426,6 +1426,7 @@ extension Ghostty {
                 let finishedID = surfaceView.id
                 MainActor.assumeIsolated {
                     KeepAlive.shared.commandFinished(in: finishedID, exitCode: v.exit_code)
+                    AgentSessionRecovery.shared.commandFinished(surfaceID: finishedID, exitCode: v.exit_code)
                 }
 
                 // Determine if we even care about command finish notifications

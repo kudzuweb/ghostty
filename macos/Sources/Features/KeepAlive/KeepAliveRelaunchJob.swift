@@ -1,6 +1,39 @@
 import Darwin
 import Foundation
 
+/// Latest request wins among queued work. Termination gates new work immediately and
+/// drains the active operation before writing the clean-quit receipt.
+final class RelaunchReconciler: @unchecked Sendable {
+    private let queue = DispatchQueue(label: "ghostty.relaunch.reconcile")
+    private let lock = NSLock()
+    private var generation: UInt64 = 0
+    private var terminating = false
+
+    func submit(_ action: @escaping @Sendable () -> Void) {
+        lock.lock()
+        guard !terminating else { lock.unlock(); return }
+        generation &+= 1
+        let requested = generation
+        lock.unlock()
+        queue.async {
+            self.lock.lock()
+            let current = !self.terminating && self.generation == requested
+            self.lock.unlock()
+            if current { action() }
+        }
+    }
+
+    func finish(_ receipt: () -> Void) {
+        lock.lock()
+        terminating = true
+        generation &+= 1
+        lock.unlock()
+        queue.sync(execute: receipt)
+    }
+
+    func drain() { queue.sync {} }
+}
+
 /// The launchd job that reopens Ghostty after it crashes (`keep-alive-relaunch-ghostty`).
 ///
 /// launchd's `KeepAlive` can only restart a process that it started itself, and a Ghostty
@@ -10,11 +43,10 @@ import Foundation
 /// so a failed `open` is retried while a normal exit is not, and `RunAtLoad` true, which
 /// `SuccessfulExit` implies. Each Ghostty launch reinstalls the job with its own pid.
 enum KeepAliveRelaunchJob {
-    /// A debug build gets its own job, so testing it can't replace or remove the job of the
-    /// Ghostty that is in daily use.
+    private static let reconciler = RelaunchReconciler()
+    private static let incarnation = UUID().uuidString
     private static var label: String {
-        let isDebug = Bundle.main.bundleIdentifier?.hasSuffix(".debug") == true
-        return isDebug ? "com.mauria.ghostty-relaunch.debug" : "com.mauria.ghostty-relaunch"
+        "com.mauria.ghostty-relaunch." + (Bundle.main.bundleIdentifier ?? "unidentified")
     }
 
     private static var plistURL: URL {
@@ -23,15 +55,18 @@ enum KeepAliveRelaunchJob {
     }
 
     private static var markerPath: String {
-        NSHomeDirectory() + "/.local/state/ghostty/clean-quit.\(label)"
+        Ghostty.forkProfileStateDirectory.appendingPathComponent("clean-quit.\(incarnation)").path
     }
 
     private static let watcherScript = """
-    pid="$1"; app="$2"; marker="$3"
+    pid="$1"; app="$2"; marker="$3"; birth="$4"
     while kill -0 "$pid" 2>/dev/null; do
-        case "$(ps -p "$pid" -o comm= 2>/dev/null)" in */ghostty) sleep 2 ;; *) break ;; esac
+        [ "$(/bin/ps -p "$pid" -o lstart= 2>/dev/null)" = "$birth" ] || break
+        sleep 2
     done
     if [ -f "$marker" ]; then rm -f "$marker"; exit 0; fi
+    expected="$app/Contents/MacOS/ghostty"
+    if /bin/ps -axo comm= | /usr/bin/awk -v expected="$expected" '$0 == expected { found=1 } END { exit !found }'; then exit 0; fi
     exec /usr/bin/open "$app"
     """
 
@@ -41,8 +76,14 @@ enum KeepAliveRelaunchJob {
         let label = label, plistURL = plistURL, markerPath = markerPath
         let pid = getpid(), appPath = Bundle.main.bundlePath
         let bundleID = Bundle.main.bundleIdentifier
-        DispatchQueue.global(qos: .utility).async {
+        reconciler.submit {
             let domain = "gui/\(getuid())"
+            // Retire only this profile's old label when upgrading the fork.
+            if Ghostty.isDailyForkProfile {
+                _ = launchctl(["bootout", "\(domain)/com.mauria.ghostty-relaunch"])
+            } else if Bundle.main.bundleIdentifier == "com.mitchellh.ghostty.debug" {
+                _ = launchctl(["bootout", "\(domain)/com.mauria.ghostty-relaunch.debug"])
+            }
             // Boot out first in both cases: a loaded job keeps the old pid and the old plist.
             _ = launchctl(["bootout", "\(domain)/\(label)"])
             guard enabled else {
@@ -51,13 +92,17 @@ enum KeepAliveRelaunchJob {
                 return
             }
 
-            // A marker left by the previous run must not hide this run's crash.
-            try? FileManager.default.removeItem(atPath: markerPath)
+            // Marker is unique to this process incarnation; never erase a quit receipt.
             try? FileManager.default.createDirectory(
                 atPath: (markerPath as NSString).deletingLastPathComponent, withIntermediateDirectories: true)
+            let birth = processBirth(pid)
+            guard !birth.isEmpty, birth != "unknown" else {
+                NSLog("KeepAlive: refused relaunch watcher without process birth identity")
+                return
+            }
             var job: [String: Any] = [
                 "Label": label,
-                "ProgramArguments": ["/bin/sh", "-c", watcherScript, "ghostty-relaunch", "\(pid)", appPath, markerPath],
+                "ProgramArguments": ["/bin/sh", "-c", watcherScript, "ghostty-relaunch", "\(pid)", appPath, markerPath, birth],
                 "RunAtLoad": true,
                 "KeepAlive": ["SuccessfulExit": false],
                 "ThrottleInterval": 10,
@@ -82,20 +127,26 @@ enum KeepAliveRelaunchJob {
     /// Tells the job that Ghostty is quitting on purpose. Called synchronously as the app
     /// terminates, because the process is about to exit.
     static func markCleanQuit() {
-        try? FileManager.default.createDirectory(
-            atPath: (markerPath as NSString).deletingLastPathComponent, withIntermediateDirectories: true)
-        FileManager.default.createFile(atPath: markerPath, contents: Data())
+        reconciler.finish {
+            do {
+                try FileManager.default.createDirectory(
+                    atPath: (markerPath as NSString).deletingLastPathComponent, withIntermediateDirectories: true)
+                try Data().write(to: URL(fileURLWithPath: markerPath), options: .atomic)
+            } catch {
+                // Without a receipt, unload the watcher rather than risk reopening a clean quit.
+                _ = launchctl(["bootout", "gui/\(getuid())/\(label)"])
+                NSLog("KeepAlive: clean quit receipt failed: %@", "\(error)")
+            }
+        }
+    }
+
+    private static func processBirth(_ pid: pid_t) -> String {
+        ForkBoundedProcess.run("/bin/ps", ["-p", "\(pid)", "-o", "lstart="], timeout: 5)
+            .output?.trimmingCharacters(in: .newlines) ?? "unknown"
     }
 
     @discardableResult
     private static func launchctl(_ arguments: [String]) -> Int32 {
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/bin/launchctl")
-        process.arguments = arguments
-        process.standardOutput = FileHandle.nullDevice
-        process.standardError = FileHandle.nullDevice
-        do { try process.run() } catch { return -1 }
-        process.waitUntilExit()
-        return process.terminationStatus
+        ForkBoundedProcess.run("/bin/launchctl", arguments, timeout: 10).status
     }
 }

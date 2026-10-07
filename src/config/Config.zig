@@ -3968,6 +3968,7 @@ pub fn deinit(self: *Config) void {
 ///   1. Defaults
 ///   2. XDG config dir
 ///   3. "Application Support" directory (macOS only)
+///      GHOSTTY_FORK_CONFIG_FILE replaces steps 2 and 3 when supplied.
 ///   4. CLI flags
 ///   5. Recursively defined configuration files
 ///
@@ -4162,6 +4163,17 @@ fn writeConfigTemplate(path: []const u8) !void {
 /// The legacy `config` file (without extension) is first loaded,
 /// then `config.ghostty`.
 pub fn loadDefaultFiles(self: *Config, alloc: Allocator) !void {
+    // A Swift-selected isolated profile replaces both default config roots,
+    // including CLI actions dispatched before NSApplicationMain. Required-file
+    // errors propagate; never fall back to daily files or create their template.
+    if (try @import("edit.zig").forkConfigPath(alloc)) |path| {
+        defer alloc.free(path);
+        var file = try file_load.open(path);
+        defer file.close();
+        try self.loadFsFile(alloc, &file, path);
+        return;
+    }
+
     // Load XDG first
     const legacy_xdg_path = try file_load.legacyDefaultXdgPath(alloc);
     defer alloc.free(legacy_xdg_path);

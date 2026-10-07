@@ -53,7 +53,7 @@ extension Ghostty {
         /// - Parameters:
         ///   - path: An optional preferred config file path. Pass `nil` to load the default configuration files.
         ///   - finalize: Whether to finalize the configuration to populate default values.
-        static func loadConfig(at path: String?, finalize: Bool) -> ghostty_config_t? {
+        static func loadConfig(at path: String?, finalize: Bool, respectForkProfile: Bool = true) -> ghostty_config_t? {
             // Initialize the global configuration.
             guard let cfg = ghostty_config_new() else {
                 logger.critical("ghostty_config_new failed")
@@ -64,7 +64,14 @@ extension Ghostty {
             // We only do this on macOS because other Apple platforms do not have the
             // same filesystem concept.
 #if os(macOS)
-            if let path {
+            if respectForkProfile && !Ghostty.isDailyForkProfile {
+                guard let isolated = ProcessInfo.processInfo.environment["GHOSTTY_FORK_CONFIG_FILE"], !isolated.isEmpty else {
+                    ghostty_config_free(cfg)
+                    logger.critical("isolated profile has no config path")
+                    return nil
+                }
+                ghostty_config_load_file(cfg, isolated)
+            } else if let path = path ?? ProcessInfo.processInfo.environment["GHOSTTY_FORK_CONFIG_FILE"], !path.isEmpty {
                 ghostty_config_load_file(cfg, path)
             } else {
                 ghostty_config_load_default_files(cfg)
@@ -72,7 +79,7 @@ extension Ghostty {
 
             // We only load CLI args when not running in Xcode because in Xcode we
             // pass some special parameters to control the debugger.
-            if !isRunningInXcode() {
+            if Ghostty.isDailyForkProfile && !isRunningInXcode() {
                 ghostty_config_load_cli_args(cfg)
             }
 

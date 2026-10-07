@@ -11,55 +11,213 @@ enum LidSleep {
     nonisolated static func isBlocked() -> Bool? {
         guard let out = run("/usr/bin/pmset", ["-g"]) else { return nil }
         for line in out.split(separator: "\n") where line.contains("SleepDisabled") {
-            return line.contains("1")
+            return line.split(whereSeparator: { $0.isWhitespace }).last == "1"
         }
         // pmset omits the line entirely on some systems when the flag is off.
         return false
     }
 
-    /// Sets the flag. Tries passwordless sudo first. With `allowPrompt`, falls back to a
-    /// standard macOS authorization prompt. Returns nil on success, or why it failed.
-    ///
-    /// The argument strings are exactly what the NOPASSWD sudoers rule matches.
-    nonisolated static func setBlocked(_ blocked: Bool, allowPrompt: Bool) -> String? {
+    /// Sets the flag with the narrow passwordless sudo rule, so the mutation and its
+    /// child process remain bounded. Authorization AppleEvents can outlive osascript
+    /// through a privileged helper and cannot safely share an automatic ownership lease.
+    nonisolated static func setBlocked(_ blocked: Bool, allowPrompt: Bool, ownershipFD: Int32 = -1) -> String? {
         let target = blocked ? "1" : "0"
-        if runStatus("/usr/bin/sudo", ["-n", "/usr/bin/pmset", "-a", "disablesleep", target]) == 0 {
+        if ForkBoundedProcess.run("/usr/bin/sudo", ["-n", "/usr/bin/pmset", "-a", "disablesleep", target], inheritedLockFD: ownershipFD).status == 0 {
             return nil
         }
-        guard allowPrompt else {
-            return "sudo -n /usr/bin/pmset -a disablesleep \(target) failed"
-        }
-
-        let script = "do shell script \"/usr/bin/pmset -a disablesleep \(target)\" with administrator privileges"
-        if runStatus("/usr/bin/osascript", ["-e", script]) == 0 {
-            return nil
-        }
-        return "Couldn't change the setting. If you cancelled the password prompt, try again."
-    }
-
-    @discardableResult
-    nonisolated private static func runStatus(_ path: String, _ args: [String]) -> Int32 {
-        let p = Process()
-        p.executableURL = URL(fileURLWithPath: path)
-        p.arguments = args
-        p.standardOutput = FileHandle.nullDevice
-        p.standardError = FileHandle.nullDevice
-        do { try p.run() } catch { return -1 }
-        p.waitUntilExit()
-        return p.terminationStatus
+        return "sudo -n /usr/bin/pmset -a disablesleep \(target) failed. The narrow passwordless sudo rule is required."
     }
 
     nonisolated private static func run(_ path: String, _ args: [String]) -> String? {
-        let p = Process()
-        p.executableURL = URL(fileURLWithPath: path)
-        p.arguments = args
-        let pipe = Pipe()
-        p.standardOutput = pipe
-        p.standardError = FileHandle.nullDevice
-        do { try p.run() } catch { return nil }
-        let data = pipe.fileHandleForReading.readDataToEndOfFile()
-        p.waitUntilExit()
-        return String(data: data, encoding: .utf8)
+        let result = ForkBoundedProcess.run(path, args)
+        return result.status == 0 ? result.output : nil
+    }
+
+}
+
+/// Serialized ownership of a persistent system setting. A crash-safe lease is written
+/// before mutation and a launchd recovery worker waits for our advisory lock to close.
+/// Test bundles never mutate pmset, even if a copied config enables Auto.
+final class SleepGuardOwnership: @unchecked Sendable {
+    struct Result { let blocked: Bool?; let error: String? }
+    private let queue = DispatchQueue(label: "ghostty.sleep.ownership")
+    private var stopped = false
+    private var lockFD: Int32 = -1
+    private var ownsBlock = false
+    private let token = UUID().uuidString
+    private let state: URL
+    private let allowed: Bool
+    private let read: @Sendable () -> Bool?
+    private let set: @Sendable (Bool, Bool, Int32) -> String?
+    private let recovery: (@Sendable () -> String?)?
+
+    init(state: URL = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".local/state/ghostty"),
+         allowed: Bool = Ghostty.isDailyForkProfile,
+         read: @escaping @Sendable () -> Bool? = { LidSleep.isBlocked() },
+         set: @escaping @Sendable (Bool, Bool, Int32) -> String? = { LidSleep.setBlocked($0, allowPrompt: $1, ownershipFD: $2) },
+         recovery: (@Sendable () -> String?)? = nil) {
+        self.state = state; self.allowed = allowed; self.read = read; self.set = set; self.recovery = recovery
+    }
+    private let recoveryLabel = "com.mauria.ghostty-sleep-recovery"
+    private var lease: URL { state.appendingPathComponent("sleep-guard.lease") }
+    private var lockFile: URL { state.appendingPathComponent("sleep-guard.lock") }
+
+    func reconcile(automatic: Bool, wantsBlock: Bool, canAcquire: Bool) -> Result {
+        queue.sync {
+            guard !stopped else { return Result(blocked: read(), error: nil) }
+            guard allowed else { return Result(blocked: read(), error: nil) }
+            if ownsBlock && (!automatic || !wantsBlock) { return release() }
+            if ownsBlock && canAcquire && read() == false {
+                let error = set(true, false, lockFD)
+                return Result(blocked: read(), error: error)
+            }
+            guard automatic, wantsBlock, canAcquire, !ownsBlock else {
+                return Result(blocked: read(), error: nil)
+            }
+            if let error = acquireLock() { return Result(blocked: read(), error: error) }
+            // A prior owner may have crashed before its recovery worker got the lock.
+            if FileManager.default.fileExists(atPath: lease.path) {
+                if let error = set(false, false, lockFD) {
+                    closeLock(); return Result(blocked: read(), error: "Sleep lease recovery failed: \(error)")
+                }
+                guard read() == false else {
+                    closeLock(); return Result(blocked: read(), error: "Stale sleep lease recovery could not be verified.")
+                }
+                do { try FileManager.default.removeItem(at: lease) } catch { closeLock(); return Result(blocked: read(), error: "Could not remove stale sleep lease: \(error)") }
+            }
+            guard read() == false else {
+                closeLock() // An external/manual block is never ours to clear.
+                return Result(blocked: read(), error: nil)
+            }
+            do { try token.write(to: lease, atomically: true, encoding: .utf8) } catch { closeLock(); return Result(blocked: false, error: "Could not persist sleep lease: \(error)") }
+            if let error = installRecovery() {
+                try? FileManager.default.removeItem(at: lease)
+                closeLock(); return Result(blocked: false, error: error)
+            }
+            // Retain ownership even if pmset fails or times out: a late/partial mutation
+            // must still be released on disable, quit, or by crash recovery.
+            ownsBlock = true
+            let error = set(true, false, lockFD)
+            return Result(blocked: read(), error: error)
+        }
+    }
+
+    func manual(block: Bool) -> Result {
+        queue.sync {
+            guard !stopped, allowed else {
+                return Result(blocked: read(), error: "Lid sleep changes are disabled in isolated test builds.")
+            }
+            if ownsBlock {
+                let released = release()
+                if released.error != nil { return released }
+            }
+            if let error = acquireLock() { return Result(blocked: read(), error: error) }
+            defer { closeLock() }
+            // Recover a stale automatic lease before an explicit manual takeover.
+            if FileManager.default.fileExists(atPath: lease.path) {
+                if let error = set(false, false, lockFD) {
+                    return Result(blocked: read(), error: error)
+                }
+                try? FileManager.default.removeItem(at: lease)
+            }
+            let error = set(block, true, lockFD)
+            return Result(blocked: read(), error: error)
+        }
+    }
+
+    func shutdown() {
+        queue.sync {
+            stopped = true
+            if ownsBlock { _ = release() }
+            // Failed release retains the durable lease. Closing gives the recovery
+            // worker ownership, so it retries passwordless restoration after exit.
+            closeLock()
+        }
+    }
+
+    private func release() -> Result {
+        guard ownsBlock else { return Result(blocked: read(), error: nil) }
+        if let error = set(false, false, lockFD) {
+            return Result(blocked: read(), error: error)
+        }
+        guard read() == false else {
+            return Result(blocked: read(), error: "Sleep release could not be verified; recovery lease retained.")
+        }
+        do { try FileManager.default.removeItem(at: lease) } catch { return Result(blocked: false, error: "Could not clear sleep lease: \(error)") }
+        ownsBlock = false
+        closeLock()
+        return Result(blocked: false, error: nil)
+    }
+
+    private func acquireLock() -> String? {
+        if lockFD >= 0 { return nil }
+        do { try FileManager.default.createDirectory(at: state, withIntermediateDirectories: true) } catch { return "Could not create sleep lease directory: \(error)" }
+        lockFD = open(lockFile.path, O_CREAT | O_RDWR | O_CLOEXEC, S_IRUSR | S_IWUSR)
+        guard lockFD >= 0 else { return "Could not open sleep ownership lock." }
+        guard flock(lockFD, LOCK_EX | LOCK_NB) == 0 else {
+            closeLock(); return "Another Ghostty instance owns lid sleep; Auto did not change it."
+        }
+        return nil
+    }
+
+    private func closeLock() {
+        if lockFD >= 0 { _ = close(lockFD); lockFD = -1 }
+    }
+
+    private func installRecovery() -> String? {
+        if let recovery { return recovery() }
+        // Perl's flock is available on supported macOS and shares the same kernel lock
+        // as Darwin.flock. No PID/name heuristic can clear a newer owner's lease.
+        let script = #"""
+        use strict; use POSIX ();
+        my ($lock, $lease, $token) = @ARGV;
+        open(my $fh, '+<', $lock) or exit 1;
+        flock($fh, 2) or exit 1;
+        open(my $lf, '<', $lease) or exit 0;
+        local $/; my $owner = <$lf>; close($lf);
+        exit 0 unless $owner eq $token;
+        my $child = fork(); exit 1 unless defined $child;
+        if ($child == 0) {
+            POSIX::setpgid(0, 0) == 0 or exit 1;
+            exec('/usr/bin/sudo', '-n', '/usr/bin/pmset', '-a', 'disablesleep', '0');
+            exit 1;
+        }
+        $SIG{TERM} = sub { kill('KILL', -$child); kill('KILL', $child); waitpid($child, 0); exit 1; };
+        my $deadline = time() + 15;
+        while (waitpid($child, POSIX::WNOHANG()) == 0) {
+            if (time() >= $deadline) {
+                kill('TERM', -$child); select(undef, undef, undef, 0.1);
+                kill('KILL', -$child); kill('KILL', $child); waitpid($child, 0); exit 1;
+            }
+            select(undef, undef, undef, 0.05);
+        }
+        my $status = $?; kill('KILL', -$child);
+        exit 1 if $status != 0;
+        unlink($lease) or exit 1;
+        exit 0;
+        """#
+        let plist = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent("Library/LaunchAgents/\(recoveryLabel).plist")
+        let job: [String: Any] = [
+            "Label": recoveryLabel,
+            "ProgramArguments": ["/usr/bin/perl", "-e", script, lockFile.path, lease.path, token],
+            "RunAtLoad": true, "KeepAlive": ["SuccessfulExit": false], "ThrottleInterval": 10,
+            "AssociatedBundleIdentifiers": ["com.mitchellh.ghostty"],
+        ]
+        do {
+            try FileManager.default.createDirectory(at: plist.deletingLastPathComponent(), withIntermediateDirectories: true)
+            let data = try PropertyListSerialization.data(fromPropertyList: job, format: .xml, options: 0)
+            try data.write(to: plist, options: .atomic)
+        } catch { return "Could not persist sleep recovery job: \(error)" }
+        _ = command(["bootout", "gui/\(getuid())/\(recoveryLabel)"])
+        guard command(["bootstrap", "gui/\(getuid())", plist.path]) == 0 else {
+            return "Sleep Auto refused to block: crash recovery watcher could not start."
+        }
+        return nil
+    }
+
+    private func command(_ arguments: [String]) -> Int32 {
+        ForkBoundedProcess.run("/bin/launchctl", arguments, timeout: 10).status
     }
 }
 
@@ -101,7 +259,9 @@ final class SleepGuard: NSObject, ObservableObject, NSMenuDelegate {
     private var lastBusy = Date()
 
     /// Whether the current block was set by Auto, so quitting can undo it.
-    private var autoBlocked = false
+    private let ownership = SleepGuardOwnership()
+    private var generation: UInt64 = 0
+    private var terminating = false
 
     /// How long Auto waits after a failed flip before trying again. The error window stays
     /// up for the same time.
@@ -145,8 +305,7 @@ final class SleepGuard: NSObject, ObservableObject, NSMenuDelegate {
         NSLog("SleepGuard config: mode=%@ grace=%.0fs", newMode.rawValue, graceSeconds)
         guard newMode != mode else { return }
         mode = newMode
-        // A manual choice owns the setting from here, so quitting must not undo it.
-        autoBlocked = false
+        generation &+= 1
         retryAfter = .distantPast
         lastBusy = Date()
         if timer != nil { tick() }
@@ -155,16 +314,7 @@ final class SleepGuard: NSObject, ObservableObject, NSMenuDelegate {
     /// Called when the overnight switch turns on or off, which changes the effective mode.
     func overnightDidChange() {
         NSLog("SleepGuard: effective mode is now %@ (configured mode %@)", effectiveMode.rawValue, mode.rawValue)
-        // Going back to Manual must not leave behind the block the overnight Auto set.
-        let releaseBlock = autoBlocked && effectiveMode == .manual
-        if releaseBlock {
-            Task {
-                let error = await Task.detached { LidSleep.setBlocked(false, allowPrompt: false) }.value
-                if let error { NSLog("SleepGuard: couldn't release the overnight block: %@", error) }
-                blocked = await Task.detached { LidSleep.isBlocked() }.value
-            }
-        }
-        autoBlocked = false
+        generation &+= 1
         retryAfter = .distantPast
         lastBusy = Date()
         if timer != nil { tick() }
@@ -173,9 +323,10 @@ final class SleepGuard: NSObject, ObservableObject, NSMenuDelegate {
     /// Called as Ghostty quits. A block Auto set shouldn't outlive the app, or a forgotten
     /// one drains a laptop in a bag. Runs synchronously because the process is exiting.
     func willTerminate() {
+        terminating = true
+        generation &+= 1
         timer?.invalidate()
-        guard effectiveMode == .auto, autoBlocked, LidSleep.isBlocked() == true else { return }
-        _ = LidSleep.setBlocked(false, allowPrompt: false)
+        ownership.shutdown()
     }
 
     @objc private func didWake() {
@@ -185,33 +336,27 @@ final class SleepGuard: NSObject, ObservableObject, NSMenuDelegate {
     // MARK: Reading and Auto
 
     private func tick() {
-        guard !busy else { return }
+        guard !busy, !terminating else { return }
         busy = true
+        let requestedGeneration = generation
+        let automatic = effectiveMode == .auto
+        let running = automatic && Self.anyProgramRunning()
+        if running { lastBusy = Date() }
+        let wantsBlock = automatic && (running || (blocked == true && Date().timeIntervalSince(lastBusy) < graceSeconds))
+        let canAcquire = Date() >= retryAfter
         Task {
-            var current = await Task.detached { LidSleep.isBlocked() }.value
-            blocked = current
-
-            if effectiveMode == .auto, let read = current, Date() >= retryAfter {
-                let desired = desiredBlocked(current: read)
-                // Only call pmset when the wanted state differs from the read state.
-                if desired != read {
-                    let error = await Task.detached {
-                        LidSleep.setBlocked(desired, allowPrompt: false)
-                    }.value
-                    if let error {
-                        retryAfter = Date().addingTimeInterval(Self.retryDelay)
-                        SleepGuardErrorPanel.shared.show(
-                            message: "Auto mode couldn't change lid sleep.\n\(error)\n\n"
-                                + "Retrying in \(Int(Self.retryDelay)) seconds.",
-                            closeAfter: Self.retryDelay)
-                    } else {
-                        autoBlocked = desired
-                    }
-                    current = await Task.detached { LidSleep.isBlocked() }.value
-                    blocked = current
-                }
-            }
+            let result = await Task.detached { [ownership] in
+                ownership.reconcile(automatic: automatic, wantsBlock: wantsBlock, canAcquire: canAcquire)
+            }.value
             busy = false
+            guard !terminating else { return }
+            blocked = result.blocked
+            if let error = result.error {
+                retryAfter = Date().addingTimeInterval(Self.retryDelay)
+                SleepGuardErrorPanel.shared.show(message: error, closeAfter: Self.retryDelay)
+            }
+            // A queued config/overnight disable must release an acquisition that finished late.
+            if generation != requestedGeneration { tick() }
         }
     }
 
@@ -413,20 +558,17 @@ final class SleepGuard: NSObject, ObservableObject, NSMenuDelegate {
     }
 
     @objc private func toggleManually() {
-        guard let current = blocked, !busy else { return }
+        guard let current = blocked, !busy, !terminating, effectiveMode == .manual else { return }
         busy = true
-        let target = !current
         Task {
-            let error = await Task.detached {
-                LidSleep.setBlocked(target, allowPrompt: true)
-            }.value
-            blocked = await Task.detached { LidSleep.isBlocked() }.value
+            let result = await Task.detached { [ownership] in ownership.manual(block: !current) }.value
             busy = false
-            if let error {
-                SleepGuardErrorPanel.shared.show(message: error, closeAfter: nil)
-            }
+            guard !terminating else { return }
+            blocked = result.blocked
+            if let error = result.error { SleepGuardErrorPanel.shared.show(message: error, closeAfter: nil) }
         }
     }
+
 }
 
 /// A small non-modal window that reports a failed flip. One instance is reused, so repeated

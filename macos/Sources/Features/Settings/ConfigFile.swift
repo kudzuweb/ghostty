@@ -12,6 +12,11 @@ enum ConfigFile {
         if let override = ProcessInfo.processInfo.environment["GHOSTTY_FORK_CONFIG_FILE"], !override.isEmpty {
             return override
         }
+        if !Ghostty.isDailyForkProfile {
+            return nil // Profile initialization must explicitly supply the editable root.
+        }
+        let explicit = explicitConfigPaths(ProcessInfo.processInfo.arguments)
+        if !explicit.isEmpty { return explicit.count == 1 ? explicit[0] : nil }
         let path = Ghostty.AllocatedString(ghostty_config_open_path()).string
         return path.isEmpty ? nil : path
     }
@@ -32,22 +37,60 @@ enum ConfigFile {
         to value: String,
         underForkHeader: Bool = false,
         at path: String? = nil,
-        reload: Bool = true
+        reload: Bool = true,
+        beforeReplace: (() throws -> Void)? = nil
     ) -> String? {
         guard let path = path ?? Self.path else { return "Couldn't find Ghostty's config file." }
         let url = URL(fileURLWithPath: path).resolvingSymlinksInPath()
         do {
-            let text = FileManager.default.fileExists(atPath: url.path)
-                ? try String(contentsOf: url, encoding: .utf8)
-                : ""
-            let updated = ConfigFileEditor.setting(key, to: value, in: text, underForkHeader: underForkHeader)
-            if updated != text {
-                try updated.write(to: url, atomically: true, encoding: .utf8)
+            try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+            var coordinationError: NSError?
+            var writeError: Error?
+            NSFileCoordinator().coordinate(writingItemAt: url, options: .forReplacing, error: &coordinationError) { coordinatedURL in
+                do {
+                    let original = try read(coordinatedURL)
+                    let text = String(data: original, encoding: .utf8)
+                    guard let text else { throw CocoaError(.fileReadInapplicableStringEncoding) }
+                    let updated = ConfigFileEditor.setting(key, to: value, in: text, underForkHeader: underForkHeader)
+                    if updated != text {
+                        try beforeReplace?()
+                        guard try read(coordinatedURL) == original else { throw EditConflict() }
+                        try updated.write(to: coordinatedURL, atomically: true, encoding: .utf8)
+                    }
+                } catch { writeError = error }
             }
+            if let error = writeError ?? coordinationError { throw error }
+
         } catch {
             return "Couldn't write \(url.path): \(error.localizedDescription)"
         }
+        NotificationCenter.default.post(name: .forkConfigDidChange, object: nil)
         if reload { (NSApp.delegate as? AppDelegate)?.ghostty.reloadConfig() }
         return nil
     }
+    static func explicitConfigPaths(_ arguments: [String]) -> [String] {
+        var paths: [String] = []
+        var index = 1
+        while index < arguments.count {
+            let argument = arguments[index]
+            if argument.hasPrefix("--config-file=") { paths.append(String(argument.dropFirst(14))) } else if argument == "--config-file", index + 1 < arguments.count {
+                index += 1
+                paths.append(arguments[index])
+            }
+            index += 1
+        }
+        return paths.filter { !$0.isEmpty }
+    }
+
+    private static func read(_ url: URL) throws -> Data {
+        FileManager.default.fileExists(atPath: url.path) ? try Data(contentsOf: url) : Data()
+    }
+
+    private struct EditConflict: LocalizedError {
+        var errorDescription: String? { "The configuration changed during this edit. Reload and try again; your edit was not saved." }
+    }
+}
+
+extension Notification.Name {
+    static let forkConfigDidChange = Notification.Name("forkConfigDidChange")
 }

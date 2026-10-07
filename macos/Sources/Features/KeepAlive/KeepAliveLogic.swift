@@ -4,7 +4,7 @@ import Foundation
 // real transcript lines without a running terminal. Nothing here touches AppKit or Ghostty.
 
 /// Which coding agent a session belongs to.
-enum AgentTool: String {
+enum AgentTool: String, Codable {
     case claude
     case codex
 
@@ -218,5 +218,33 @@ enum KeepAliveAgents {
     /// stopped by a person and a `done` one finished, so neither is touched.
     static func respawnTargets(_ sessions: [KeepAliveBackgroundSession]) -> [KeepAliveBackgroundSession] {
         sessions.filter { $0.state == "failed" }
+    }
+}
+
+/// Visible prompt transport state, projected from the actual mailbox lifecycle.
+struct KeepAlivePromptStatus: Equatable {
+    enum Phase: Equatable { case waiting, attention }
+    let phase: Phase
+    let message: String
+
+    enum Event {
+        case submitted, claimed, accepted, dropped, disabled, newSession
+        case unavailable(String), rejected(String), unknown
+    }
+
+    static func after(_ event: Event) -> Self? {
+        switch event {
+        case .submitted:
+            return .init(phase: .waiting, message: "Waiting for the agent to acknowledge the keep alive prompt.")
+        case .claimed:
+            return .init(phase: .waiting, message: "The agent claimed the prompt; waiting for delivery confirmation.")
+        case .unavailable(let message), .rejected(let message):
+            return .init(phase: .attention, message: message)
+        case .unknown:
+            return .init(phase: .attention,
+                         message: "Prompt delivery is unconfirmed. Check the agent; keep alive will not duplicate an uncertain request.")
+        case .accepted, .dropped, .disabled, .newSession:
+            return nil
+        }
     }
 }

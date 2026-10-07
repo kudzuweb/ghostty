@@ -22,7 +22,7 @@ extension TerminalWindow {
 /// One timer ticks every `tickInterval`. For each kept-alive tab it remembers the session
 /// running in the terminal's foreground, so the session is still known after its process dies.
 /// A tab whose session died with a crash-like exit status gets the resume command typed into
-/// it. A Claude Code session that is idle on an API error gets `continue` typed into it, on
+/// it. A Claude Code session that is idle on an API error gets a native continuation prompt, on
 /// the schedule the config sets. The decisions themselves are in `KeepAliveLogic.swift`.
 ///
 /// The usage cutoff (`UsageCutoff.swift`) and the overnight switch live here too, because
@@ -65,22 +65,23 @@ final class KeepAlive: ObservableObject {
 
     static let tickInterval: TimeInterval = 30
 
-    /// How long to wait between typing a command and pressing Enter. Claude Code reads a
-    /// burst of text that ends in a newline as a paste, so Enter has to arrive on its own.
-    private static let enterDelay: Duration = .milliseconds(300)
-
     private(set) var settings = Settings()
+
+    @Published private(set) var promptStatuses: [UUID: KeepAlivePromptStatus] = [:]
 
     private struct RunningSession {
         let tool: AgentTool
         let id: String
         let pid: Int
+        let binding: AgentSessionBinding
+        let processIdentity: AgentSessionProcessIdentity
     }
 
     /// What keep alive knows about one terminal in a kept-alive tab.
     private struct SurfaceState {
         /// The last session seen running here, kept after its process dies.
         var session: RunningSession?
+        var observedInputGeneration: UInt64 = 0
         var crashes = KeepAliveCrashWindow()
         var gaveUpRecorded = false
         var warnedNoExitStatus = false
@@ -92,6 +93,8 @@ final class KeepAlive: ObservableObject {
         /// when the cutoff was recorded, so each happens once per workday.
         var wrapUpFor: Date?
         var reachedFor: Date?
+        var bridgeProblem: String?
+        var bridgeUnavailable = false
     }
 
     /// Where the usage cutoff stands, worked out once per tick.
@@ -103,24 +106,48 @@ final class KeepAlive: ObservableObject {
     }
 
     private var surfaceStates: [UUID: SurfaceState] = [:]
+    private var tickEvidence: [UUID: (foreground: Int?, input: UInt64)] = [:]
 
     /// The exit status of the last command that finished in each terminal, as reported by
     /// shell integration. It is how a deliberate exit is told from a crash.
     private var exitStatuses: [UUID: Int16] = [:]
+
+    private struct PendingPrompt {
+        let capability: AgentPromptBridge.Capability
+        let requestID: UUID
+        let generation: String
+        let session: RunningSession
+        let foreground: Int?
+        let inputGeneration: UInt64
+        let workday: Date?
+        let cutoff: Date?
+        let error: KeepAliveApiError?
+        let title: String
+        let expiresAt: Date
+        var revoked = false
+    }
+    private let promptBridge = AgentPromptBridge()
+    private var pendingPrompts: [UUID: PendingPrompt] = [:]
+    private var promptTimer: Timer?
 
     private var respawnLimiter = KeepAliveRespawnLimiter()
     private var transcriptPaths: [String: String] = [:]
     private var claudePath: String?
     private var timer: Timer?
     private var ticking = false
-    private var relaunchApplied: Bool?
+    private var tickTask: Task<Void, Never>?
+    private var configurationGeneration: UInt64 = 0
+    private var shuttingDown = false
 
     // Usage cutoff and overnight state.
     private var stampsCache: (at: Date, stamps: [Date])?
     private static let stampsLifetime: TimeInterval = 300
-    private var reachedWorkday: Date?
+    private var cutoffHold = UsageCutoff.Hold(
+        workday: UserDefaults.ghostty.object(forKey: "KeepAliveReachedWorkday") as? Date,
+        cutoff: UserDefaults.ghostty.object(forKey: "KeepAliveReachedCutoff") as? Date)
     private var lastLoggedCutoff: Date?
     private var respawnHoldLogged = false
+    private var backgroundCutoff: Date?
 
     /// Whether the overnight switch is on and has not yet reached the workday start.
     @Published private(set) var overnightActive = false
@@ -141,6 +168,7 @@ final class KeepAlive: ObservableObject {
 
     /// Takes the settings from the config. Called at launch and on every reload.
     func apply(_ config: Ghostty.Config) {
+        authorizationDidChange()
         settings = Settings(
             maxCrashes: config.keepAliveMaxCrashes,
             serverErrorInterval: config.keepAliveServerErrorInterval,
@@ -163,25 +191,57 @@ final class KeepAlive: ObservableObject {
               settings.cutoff.margin, settings.cutoffWarning, settings.cutoffStopSessions ? "true" : "false",
               settings.overnightRun ? "true" : "false")
         refreshOvernight()
-        if relaunchApplied != settings.relaunchGhostty {
-            relaunchApplied = settings.relaunchGhostty
-            KeepAliveRelaunchJob.sync(enabled: settings.relaunchGhostty)
-        }
+        KeepAliveRelaunchJob.sync(enabled: settings.relaunchGhostty)
     }
 
     /// Called as Ghostty quits normally, so the relaunch job can tell a quit from a crash.
     func willTerminate() {
+        shuttingDown = true
+        cancelPrompts()
+        tickTask?.cancel()
+        GuardedTerminalInput.shared.cancelAll()
         timer?.invalidate()
-        if settings.relaunchGhostty { KeepAliveRelaunchJob.markCleanQuit() }
+        KeepAliveRelaunchJob.markCleanQuit()
+    }
+
+    /// Tab changes revoke leases immediately, including a switch during an awaited CLI.
+    func authorizationDidChange() {
+        tickTask?.cancel()
+        configurationGeneration &+= 1
+        cancelPrompts()
+        promptStatuses.removeAll()
+        GuardedTerminalInput.shared.cancelAll()
+    }
+
+    private func cancelPrompts() {
+        for request in pendingPrompts.values {
+            try? promptBridge.cancel(capability: request.capability, generation: request.generation)
+        }
+        pendingPrompts.removeAll()
+        promptTimer?.invalidate()
+        promptTimer = nil
     }
 
     /// Records the exit status of a command that finished in a terminal. Shell integration
     /// reports it, and a status of -1 means the shell did not say.
     func commandFinished(in surface: UUID, exitCode: Int16) {
         NSLog("KeepAlive: a command finished in terminal %@ with exit status %d", surface.uuidString, exitCode)
-        if exitCode < 0 {
-            exitStatuses[surface] = nil
+        // Only the first shell completion after the observed agent died can belong to
+        // that agent. Consume deliberate exits immediately, before a later shell command.
+        guard var state = surfaceStates[surface], let session = state.session,
+              !AgentSessionResume.isAlive(session.processIdentity), exitStatuses[surface] == nil else { return }
+        if exitCode < 0 || KeepAliveExit.isDeliberate(exitCode: exitCode) {
+            state.session = nil
+            surfaceStates[surface] = state
         } else {
+            // A later shell command must not lend its failure to an old agent. If any
+            // unobserved user input occurred, attribution is ambiguous: forget the agent.
+            let current = keptAliveTabs().flatMap(\.surfaces).first { $0.id == surface }
+            guard current?.userInputGeneration == state.observedInputGeneration else {
+                state.session = nil
+                surfaceStates[surface] = state
+                return
+            }
             exitStatuses[surface] = exitCode
         }
     }
@@ -315,21 +375,31 @@ final class KeepAlive: ObservableObject {
         refreshOvernight()
         guard !ticking else { return }
         let tabs = keptAliveTabs()
-        let wantsBackground = settings.background == .failed
+        let wantsBackground = Ghostty.isDailyForkProfile && settings.background == .failed
         guard !tabs.isEmpty || wantsBackground else {
             surfaceStates.removeAll()
             return
         }
+        tickEvidence = Dictionary(uniqueKeysWithValues: tabs.flatMap { tab in
+            tab.surfaces.map { ($0.id, (foreground: $0.surfaceModel?.foregroundPID, input: $0.userInputGeneration)) }
+        })
         ticking = true
 
         // `claude agents --json --all` lists interactive sessions' status and background
         // sessions' state in one call, so it runs at most once per tick.
-        Task {
+        let generation = configurationGeneration
+        tickTask = Task {
+            defer { ticking = false; tickTask = nil }
             let snapshot = await fetchAgents()
-            let context = await cutoffContext(for: tabs)
-            process(tabs, snapshot: snapshot, cutoff: context)
-            if wantsBackground, let snapshot, !(await respawnHeld()) { await respawnFailed(snapshot.background) }
-            ticking = false
+            guard !Task.isCancelled, !shuttingDown, generation == configurationGeneration else { return }
+            let context = await cutoffContext(for: keptAliveTabs())
+            guard !Task.isCancelled, !shuttingDown, generation == configurationGeneration else { return }
+            process(keptAliveTabs(), snapshot: snapshot, cutoff: context)
+            if Ghostty.isDailyForkProfile, settings.background == .failed, let snapshot, !(await respawnHeld()) {
+                guard !Task.isCancelled, !shuttingDown, generation == configurationGeneration,
+                      Ghostty.isDailyForkProfile, settings.background == .failed else { return }
+                await respawnFailed(snapshot.background)
+            }
         }
     }
 
@@ -372,23 +442,39 @@ final class KeepAlive: ObservableObject {
     /// Where the cutoff stands for this tick, or nil when no watched tab is covered by it
     /// or no cutoff is due yet. Reaching the cutoff holds until the workday starts, even if
     /// a later computation moves the cutoff.
+    private func latchReachedCutoff(_ cutoff: Date, workday: Date) {
+        cutoffHold = UsageCutoff.Hold(workday: workday, cutoff: cutoff)
+        UserDefaults.ghostty.set(workday, forKey: "KeepAliveReachedWorkday")
+        UserDefaults.ghostty.set(cutoff, forKey: "KeepAliveReachedCutoff")
+    }
+
+    private func clearReachedCutoff() {
+        cutoffHold = UsageCutoff.Hold()
+        UserDefaults.ghostty.removeObject(forKey: "KeepAliveReachedWorkday")
+        UserDefaults.ghostty.removeObject(forKey: "KeepAliveReachedCutoff")
+    }
+
     private func cutoffContext(for tabs: [Tab]) async -> CutoffContext? {
         guard tabs.contains(where: { usageCutoffApplies(to: $0.window) }) else { return nil }
         let now = Date()
         let workday = UsageCutoff.workday(after: now, workdayMinutes: settings.cutoff.workdayMinutes)
-        if reachedWorkday != workday { reachedWorkday = nil }
+        if cutoffHold.workday != workday { clearReachedCutoff() }
+        if cutoffHold.workday == workday, let cutoff = cutoffHold.cutoff {
+            return CutoffContext(cutoff: cutoff, phase: .reached, workday: workday)
+        }
+        let generation = configurationGeneration
         let stamps = await transcriptStamps(now: now)
+        guard generation == configurationGeneration, !Task.isCancelled, !shuttingDown else { return nil }
         let computed = UsageCutoff.cutoff(stamps: stamps, now: now, settings: settings.cutoff)
         if computed != lastLoggedCutoff {
             lastLoggedCutoff = computed
             NSLog("KeepAlive: usage cutoff is %@ (workday start %@)",
                   computed.map { "\($0)" } ?? "not due", "\(workday)")
         }
-        var phase = UsageCutoff.phase(cutoff: computed, now: now, warning: settings.cutoffWarning)
-        if phase == .reached { reachedWorkday = workday }
-        if reachedWorkday == workday { phase = .reached }
-        guard phase != .clear, let cutoff = computed else { return nil }
-        return CutoffContext(cutoff: cutoff, phase: phase, workday: workday)
+        guard let resolved = cutoffHold.resolve(
+            computed: computed, now: now, workday: workday, warning: settings.cutoffWarning) else { return nil }
+        if resolved.phase == .reached { latchReachedCutoff(resolved.cutoff, workday: workday) }
+        return CutoffContext(cutoff: resolved.cutoff, phase: resolved.phase, workday: workday)
     }
 
     /// Whether the usage cutoff holds background-session respawns back this tick. It applies
@@ -396,15 +482,19 @@ final class KeepAlive: ObservableObject {
     private func respawnHeld() async -> Bool {
         let applies = settings.usageCutoff || overnightActive
         var held = false
+        backgroundCutoff = nil
         if applies {
             let now = Date()
             let workday = UsageCutoff.workday(after: now, workdayMinutes: settings.cutoff.workdayMinutes)
-            if reachedWorkday != workday { reachedWorkday = nil }
+            if cutoffHold.workday != workday { clearReachedCutoff() }
+            let generation = configurationGeneration
             let stamps = await transcriptStamps(now: now)
+            guard generation == configurationGeneration, !Task.isCancelled, !shuttingDown else { return true }
             let computed = UsageCutoff.cutoff(stamps: stamps, now: now, settings: settings.cutoff)
+            backgroundCutoff = computed
             held = UsageCutoff.holdsRespawn(
-                applies: true, cutoff: computed, now: now, reachedWorkday: reachedWorkday, workday: workday)
-            if held { reachedWorkday = workday }
+                applies: true, cutoff: computed, now: now, reachedWorkday: cutoffHold.workday, workday: workday)
+            if held, let computed { latchReachedCutoff(computed, workday: workday) }
         }
         if held != respawnHoldLogged {
             respawnHoldLogged = held
@@ -416,10 +506,14 @@ final class KeepAlive: ObservableObject {
     private func process(_ tabs: [Tab], snapshot: KeepAliveAgents.Snapshot?, cutoff: CutoffContext?) {
         let live = Set(tabs.flatMap { $0.surfaces.map(\.id) })
         surfaceStates = surfaceStates.filter { live.contains($0.key) }
+        promptStatuses = promptStatuses.filter { live.contains($0.key) }
         exitStatuses = exitStatuses.filter { live.contains($0.key) }
 
         for tab in tabs {
             for surface in tab.surfaces {
+                guard let evidence = tickEvidence[surface.id],
+                      evidence.foreground == surface.surfaceModel?.foregroundPID,
+                      evidence.input == surface.userInputGeneration else { continue }
                 processSurface(surface, in: tab.window, snapshot: snapshot, context: cutoff)
             }
         }
@@ -444,22 +538,37 @@ final class KeepAlive: ObservableObject {
 
         guard let foreground = surface.surfaceModel?.foregroundPID else { return }
 
-        if let found = AgentSessionResume.session(forProcess: foreground) {
-            if state.session?.id != found.id || state.session?.pid != foreground {
+        if case .found(let binding, let ownerPID) = AgentSessionResume.observe(
+            foregroundGroup: foreground, tty: surface.surfaceModel?.ttyName, cwd: surface.pwd) {
+            let found = (tool: binding.tool, id: binding.sessionID.uuidString.lowercased())
+            let agentPID = Int(ownerPID)
+            guard let identity = AgentSessionResume.processIdentity(ownerPID) else { return }
+            if state.session?.id != found.id || state.session?.pid != agentPID {
                 exitStatuses[key] = nil
                 state.warnedNoExitStatus = false
+                state.bridgeProblem = nil
+                state.bridgeUnavailable = false
+                promptStatuses[key] = KeepAlivePromptStatus.after(.newSession)
             }
-            if state.session?.id != found.id || state.session?.pid != foreground {
+            if state.session?.id != found.id || state.session?.pid != agentPID {
                 NSLog("KeepAlive: watching %@ session %@ (pid %d) in %@", found.tool.rawValue, found.id, foreground, window.title)
             }
-            state.session = RunningSession(tool: found.tool, id: found.id, pid: foreground)
+            if state.bridgeUnavailable,
+               (try? promptBridge.capability(sessionID: binding.sessionID, processID: ownerPID)) != nil {
+                state.bridgeUnavailable = false
+                state.bridgeProblem = nil
+                promptStatuses[key] = nil
+            }
+            state.observedInputGeneration = surface.userInputGeneration
+            state.session = RunningSession(tool: found.tool, id: found.id, pid: agentPID, binding: binding, processIdentity: identity)
             if let cutoff {
-                handleCutoff(surface, window: window, state: &state, pid: foreground, snapshot: snapshot, cutoff: cutoff)
-                // After the cutoff nothing is typed into the session until the workday starts.
-                if cutoff.phase == .reached { return }
+                handleCutoff(surface, window: window, state: &state, pid: agentPID, snapshot: snapshot, cutoff: cutoff)
+                // Cutoff phases own the action; API retries wait until the workday starts.
+                // Warning owns this tick too; an API nudge must not concatenate with wrap-up.
+                return
             }
             if found.tool == .claude {
-                handleApiError(surface, window: window, state: &state, pid: foreground, snapshot: snapshot)
+                handleApiError(surface, window: window, state: &state, pid: agentPID, snapshot: snapshot)
             }
             return
         }
@@ -467,7 +576,7 @@ final class KeepAlive: ObservableObject {
         // No session in the foreground. It is a crash only if the session we knew has gone,
         // the shell is back, and the shell reported a crash-like exit status.
         guard let known = state.session,
-              !processExists(known.pid),
+              !AgentSessionResume.isAlive(known.processIdentity),
               let name = SleepGuard.executableName(of: foreground),
               SleepGuard.idleShells.contains(name)
         else { return }
@@ -485,7 +594,8 @@ final class KeepAlive: ObservableObject {
             exitStatuses[key] = nil
             return
         }
-        guard !window.keepAliveGaveUp else { return }
+        guard !window.keepAliveGaveUp,
+              !AgentSessionRecovery.shared.hasPendingRecovery(surfaceID: surface.id) else { return }
         // Once the wrap-up is due, a session that ended is left ended, as the watchdog did.
         if cutoff != nil { return }
 
@@ -494,7 +604,14 @@ final class KeepAlive: ObservableObject {
             exitStatuses[key] = nil
             record(.relaunched, tool: known.tool, sessionID: known.id, tabTitle: title,
                    message: "exited with status \(exitStatus)")
-            type(known.tool.resumeCommand(sessionID: known.id), into: surface)
+            let generation = configurationGeneration
+            AgentSessionRecovery.shared.requestResume(in: surface, binding: known.binding) { [weak self, weak surface] in
+                guard let self, let surface, !self.shuttingDown,
+                      self.configurationGeneration == generation else { return false }
+                return self.keptAliveTabs().contains { tab in
+                    tab.surfaces.contains { $0.id == surface.id } && !tab.window.keepAliveGaveUp
+                }
+            }
         } else {
             window.keepAliveGaveUp = true
             state.gaveUpRecorded = true
@@ -520,11 +637,10 @@ final class KeepAlive: ObservableObject {
         let when = cutoff.cutoff.formatted(date: .omitted, time: .shortened)
 
         // Claude Code only: Codex has no idle status to wait for.
-        if state.wrapUpFor != cutoff.workday, session.tool == .claude, snapshot?.interactiveStatus[pid] == "idle" {
-            state.wrapUpFor = cutoff.workday
-            record(.cutoffWarning, tool: .claude, sessionID: session.id, tabTitle: window.title,
-                   message: "usage cutoff at \(when); wrap-up prompt typed")
-            type(UsageCutoff.wrapUpPrompt(cutoff: cutoff.cutoff), into: surface)
+        if cutoff.phase == .winding, state.wrapUpFor != cutoff.workday, session.tool == .claude,
+           snapshot?.interactiveStatus[pid] == "idle" {
+            submitPrompt(session: session, surface: surface, window: window,
+                         workday: cutoff.workday, cutoff: cutoff.cutoff, error: nil, state: &state)
         }
 
         if cutoff.phase == .reached, state.reachedFor != cutoff.workday {
@@ -534,8 +650,13 @@ final class KeepAlive: ObservableObject {
             if !prompted { message += "; the wrap-up prompt was never typed" }
             if settings.cutoffStopSessions { message += "; the session was stopped" }
             record(.cutoffReached, tool: session.tool, sessionID: session.id, tabTitle: window.title, message: message)
-            if settings.cutoffStopSessions, let target = pid_t(exactly: pid) {
-                kill(target, SIGTERM)
+            if settings.cutoffStopSessions, AgentSessionResume.isAlive(session.processIdentity),
+               let foreground = surface.surfaceModel?.foregroundPID,
+               case .found(let binding, let currentPID) = AgentSessionResume.observe(
+                foregroundGroup: foreground, tty: surface.surfaceModel?.ttyName, cwd: surface.pwd),
+               binding == session.binding, currentPID == session.processIdentity.pid,
+               AgentSessionResume.isAlive(session.processIdentity) {
+                kill(currentPID, SIGTERM)
             }
         }
     }
@@ -572,13 +693,13 @@ final class KeepAlive: ObservableObject {
                    errorType: error.type, message: error.message)
             notifyKeepAlive(title: "Claude Code is stuck: \(error.type)", body: "\(window.title): \(error.message)")
         }
-        // Typing needs the session to say it is idle. A busy or waiting session, or an
-        // unreadable status, is left alone.
+        // The snapshot is only advice: the native bridge rechecks agent readiness and
+        // the expiring authorization before submitting through the agent prompt API.
         if decision.nudge, snapshot?.interactiveStatus[pid] == "idle" {
-            state.errorLastNudge = Date()
-            record(.nudged, tool: .claude, sessionID: session.id, tabTitle: window.title,
-                   errorType: error.type, message: error.message)
-            type("continue", into: surface)
+            submitPrompt(session: session, surface: surface, window: window,
+                         workday: nil, cutoff: usageCutoffApplies(to: window)
+                            ? lastLoggedCutoff?.addingTimeInterval(-settings.cutoffWarning) : nil,
+                         error: error, state: &state)
         }
     }
 
@@ -606,7 +727,7 @@ final class KeepAlive: ObservableObject {
         let start = size > 65536 ? size - 65536 : 0
         try? handle.seek(toOffset: start)
         let data = (try? handle.readToEnd()) ?? Data()
-        return String(bytes: data, encoding: .utf8) ?? ""
+        return String(decoding: data, as: UTF8.self)
     }
 
     // MARK: Background sessions
@@ -616,7 +737,10 @@ final class KeepAlive: ObservableObject {
         let names = Dictionary(failed.map { ($0.id, $0.name) }, uniquingKeysWith: { first, _ in first })
         let actions = respawnLimiter.decide(failed: failed.map(\.id), now: Date(), limit: settings.maxCrashes)
 
+        let generation = configurationGeneration
         for action in actions {
+            guard !Task.isCancelled, !shuttingDown, generation == configurationGeneration,
+                  Ghostty.isDailyForkProfile, settings.background == .failed else { return }
             switch action {
             case .giveUp(let id):
                 let name = names[id] ?? ""
@@ -624,62 +748,162 @@ final class KeepAlive: ObservableObject {
                        message: "background session failed more than \(settings.maxCrashes) times in 60 minutes")
                 notifyKeepAlive(title: "Keep alive gave up", body: "Background session \(name) keeps failing.")
             case .respawn(let id):
-                record(.respawned, tool: .claude, sessionID: id, tabTitle: names[id],
-                       message: "background session state was failed")
-                _ = await runClaude(["respawn", id])
+                guard !(await respawnHeld()), !Task.isCancelled, !shuttingDown,
+                      generation == configurationGeneration, Ghostty.isDailyForkProfile,
+                      settings.background == .failed else { return }
+                let boundary = backgroundCutoff
+                if await runClaude(["respawn", id], authorized: {
+                    generation == configurationGeneration && settings.background == .failed
+                        && !shuttingDown && (boundary.map { Date() < $0 } ?? true)
+                }) != nil {
+                    record(.respawned, tool: .claude, sessionID: id, tabTitle: names[id],
+                           message: "failed background session respawn accepted by Claude CLI")
+                }
             }
         }
     }
 
-    // MARK: Typing
+    // MARK: Native agent prompts
 
-    /// Types a line into a terminal: the text, then Enter as its own key press.
-    private func type(_ text: String, into surface: Ghostty.SurfaceView) {
-        guard let model = surface.surfaceModel else { return }
-        model.sendText(text)
-        Task { [weak surface] in
-            try? await Task.sleep(for: Self.enterDelay)
-            guard let model = surface?.surfaceModel else { return }
-            model.sendKeyEvent(.init(key: .enter, action: .press))
-            model.sendKeyEvent(.init(key: .enter, action: .release))
+    private func submitPrompt(
+        session: RunningSession, surface: Ghostty.SurfaceView, window: TerminalWindow,
+        workday: Date?, cutoff: Date?, error: KeepAliveApiError?, state: inout SurfaceState
+    ) {
+        guard pendingPrompts[surface.id] == nil, !shuttingDown,
+              AgentSessionResume.isAlive(session.processIdentity) else { return }
+        do {
+            let capability = try promptBridge.capability(
+                sessionID: session.binding.sessionID, processID: session.processIdentity.pid)
+            let generation = "\(configurationGeneration):\(UUID().uuidString)"
+            let expires = min(Date().addingTimeInterval(2), cutoff ?? .distantFuture)
+            try promptBridge.authorize(capability: capability, generation: generation, expiresAt: expires)
+            guard AgentSessionResume.isAlive(session.processIdentity) else {
+                try? promptBridge.cancel(capability: capability, generation: generation)
+                return
+            }
+            let requestID = try promptBridge.submit(
+                capability: capability, generation: generation,
+                action: workday == nil ? .continue : .wrapup,
+                reason: error?.message ?? "Usage cutoff warning", cutoffAt: cutoff, expiresAt: expires)
+            pendingPrompts[surface.id] = PendingPrompt(
+                capability: capability, requestID: requestID, generation: generation, session: session,
+                foreground: surface.surfaceModel?.foregroundPID, inputGeneration: surface.userInputGeneration,
+                workday: workday, cutoff: cutoff, error: error, title: window.title, expiresAt: expires)
+            state.bridgeProblem = nil
+            state.bridgeUnavailable = false
+            promptStatuses[surface.id] = KeepAlivePromptStatus.after(.submitted)
+            if promptTimer == nil {
+                promptTimer = Timer.scheduledTimer(withTimeInterval: 0.2, repeats: true) { [weak self] _ in
+                    MainActor.assumeIsolated { self?.pollPrompts() }
+                }
+            }
+        } catch {
+            let message = "Native agent prompt unavailable: \(error.localizedDescription)"
+            if case AgentPromptBridge.BridgeError.pending = error {
+                state.bridgeUnavailable = false
+                promptStatuses[surface.id] = KeepAlivePromptStatus.after(.unknown)
+            } else {
+                state.bridgeUnavailable = true
+                promptStatuses[surface.id] = KeepAlivePromptStatus.after(.unavailable(message))
+            }
+            guard state.bridgeProblem != message else { return }
+            state.bridgeProblem = message
+            record(.errorNotified, tool: session.tool, sessionID: session.id, tabTitle: window.title,
+                   errorType: "prompt_bridge", message: message)
+            notifyKeepAlive(title: "Keep alive needs the agent bridge", body: "\(window.title): \(message)")
         }
+    }
+
+    private func pollPrompts() {
+        let tabs = keptAliveTabs()
+        let surfaces = Dictionary(uniqueKeysWithValues: tabs.flatMap { tab in
+            tab.surfaces.map { ($0.id, (surface: $0, window: tab.window)) }
+        })
+        for (id, original) in pendingPrompts {
+            var request = original
+            let receipt = try? promptBridge.receipt(capability: request.capability, requestID: request.requestID)
+            if receipt?.status == .accepted {
+                var state = surfaceStates[id] ?? SurfaceState()
+                if request.workday != nil {
+                    if state.session?.id == request.session.id { state.wrapUpFor = request.workday }
+                    record(.cutoffWarning, tool: .claude, sessionID: request.session.id, tabTitle: request.title,
+                           message: "usage cutoff wrap-up accepted through native prompt API")
+                } else {
+                    if state.session?.id == request.session.id, state.errorUUID == request.error?.uuid {
+                        state.errorLastNudge = Date()
+                    }
+                    record(.nudged, tool: .claude, sessionID: request.session.id, tabTitle: request.title,
+                           errorType: request.error?.type, message: request.error?.message)
+                }
+                state.bridgeProblem = nil
+                state.bridgeUnavailable = false
+                surfaceStates[id] = state
+                promptStatuses[id] = KeepAlivePromptStatus.after(.accepted)
+                pendingPrompts[id] = nil
+                continue
+            }
+            if receipt?.status == .claimed {
+                promptStatuses[id] = KeepAlivePromptStatus.after(.claimed)
+            }
+            if receipt?.status == .rejected || receipt?.status == .dropped {
+                promptStatuses[id] = receipt?.status == .dropped ? KeepAlivePromptStatus.after(.dropped)
+                    : KeepAlivePromptStatus.after(.rejected(receipt?.detail ?? "The agent rejected the keep alive prompt."))
+                pendingPrompts[id] = nil
+                continue
+            }
+            let current = surfaces[id]
+            let cutoffStillValid = request.cutoff.map { Date() < $0 } ?? true
+            let valid = !shuttingDown && Date() < request.expiresAt && cutoffStillValid
+                && current?.surface.surfaceModel?.foregroundPID == request.foreground
+                && current?.surface.userInputGeneration == request.inputGeneration
+                && AgentSessionResume.isAlive(request.session.processIdentity)
+                && (request.workday == nil || current.map { usageCutoffApplies(to: $0.window) } == true)
+            if !valid, !request.revoked {
+                try? promptBridge.cancel(capability: request.capability, generation: request.generation)
+                request.revoked = true
+                pendingPrompts[id] = request
+            }
+            // A claimed request may still finish after lease revocation. Observe its
+            // receipt without renewing authority or repeating delivery.
+            if Date() >= request.expiresAt.addingTimeInterval(30) {
+                promptStatuses[id] = KeepAlivePromptStatus.after(.unknown)
+                let message = "Native prompt delivery is unacknowledged; check the agent before retrying."
+                var state = surfaceStates[id] ?? SurfaceState()
+                if state.bridgeProblem != message {
+                    state.bridgeProblem = message
+                    record(.errorNotified, tool: .claude, sessionID: request.session.id, tabTitle: request.title,
+                           errorType: "prompt_bridge", message: message)
+                    notifyKeepAlive(title: "Keep alive prompt needs checking", body: "\(request.title): \(message)")
+                }
+                surfaceStates[id] = state
+                pendingPrompts[id] = nil
+            }
+        }
+        if pendingPrompts.isEmpty { promptTimer?.invalidate(); promptTimer = nil }
     }
 
     // MARK: Processes
 
-    private func processExists(_ pid: Int) -> Bool {
-        guard let pid = pid_t(exactly: pid) else { return false }
-        return kill(pid, 0) == 0 || errno == EPERM
-    }
-
     private func fetchAgents() async -> KeepAliveAgents.Snapshot? {
+        guard Ghostty.isDailyForkProfile else { return nil }
         guard let output = await runClaude(["agents", "--json", "--all"]) else { return nil }
         return KeepAliveAgents.parse(output)
     }
 
     /// Runs `claude` with the arguments and returns its output, or nil if it failed.
-    private func runClaude(_ arguments: [String]) async -> Data? {
-        guard let path = claudeExecutable() else {
+    private func runClaude(_ arguments: [String], authorized: () -> Bool = { true }) async -> Data? {
+        guard Ghostty.isDailyForkProfile else { return nil }
+        guard !Task.isCancelled, let path = await claudeExecutable(), !Task.isCancelled else {
             NSLog("KeepAlive: couldn't find the claude executable")
             return nil
         }
-        return await Task.detached {
-            let process = Process()
-            process.executableURL = URL(fileURLWithPath: path)
-            process.arguments = arguments
-            let pipe = Pipe()
-            process.standardOutput = pipe
-            process.standardError = FileHandle.nullDevice
-            do { try process.run() } catch { return nil }
-            let data = pipe.fileHandleForReading.readDataToEndOfFile()
-            process.waitUntilExit()
-            return process.terminationStatus == 0 ? data : nil
-        }.value
+        guard authorized(), !Task.isCancelled else { return nil }
+        return await BoundedProcess.run(executable: path, arguments: arguments)
     }
 
     /// Where `claude` is. Ghostty started from the Dock has no shell PATH, so the usual
     /// install places are tried before asking a login shell.
-    private func claudeExecutable() -> String? {
+    private func claudeExecutable() async -> String? {
         if let claudePath { return claudePath }
         let home = NSHomeDirectory()
         let candidates = ["\(home)/.local/bin/claude", "/opt/homebrew/bin/claude", "/usr/local/bin/claude"]
@@ -687,15 +911,8 @@ final class KeepAlive: ObservableObject {
             claudePath = found
             return found
         }
-        let shell = Process()
-        shell.executableURL = URL(fileURLWithPath: "/bin/zsh")
-        shell.arguments = ["-lc", "command -v claude"]
-        let pipe = Pipe()
-        shell.standardOutput = pipe
-        shell.standardError = FileHandle.nullDevice
-        guard (try? shell.run()) != nil else { return nil }
-        let data = pipe.fileHandleForReading.readDataToEndOfFile()
-        shell.waitUntilExit()
+        guard let data = await BoundedProcess.run(executable: "/bin/zsh", arguments: ["-lc", "command -v claude"])
+        else { return nil }
         let path = (String(bytes: data, encoding: .utf8) ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
         guard !path.isEmpty, FileManager.default.isExecutableFile(atPath: path) else { return nil }
         claudePath = path

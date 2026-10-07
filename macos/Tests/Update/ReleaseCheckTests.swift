@@ -74,7 +74,11 @@ struct ReleaseCheckFlowTests {
             },
             now: { recorder.clock },
             present: { recorder.shown.append($0?.version.tag) },
-            notify: { recorder.notified.append($0.version.tag) })
+            notify: { notice, isCurrent in
+                guard isCurrent() else { return false }
+                recorder.notified.append(notice.version.tag)
+                return true
+            })
         check.enabled = true
         return check
     }
@@ -151,5 +155,63 @@ struct ReleaseCheckFlowTests {
         recorder.clock.addTimeInterval(6 * 3600)
         await check.run(force: false)
         #expect(recorder.fetches == 2)
+    }
+}
+
+@MainActor
+struct ReleaseCheckRaceTests {
+    @Test func disablingDuringFetchDiscardsResult() async {
+        var continuation: CheckedContinuation<[String], Never>?
+        var notices = 0
+        let defaults = UserDefaults(suiteName: "release-race-\(UUID())")!
+        let check = ReleaseCheck(defaults: defaults,
+                                 fetchTags: { await withCheckedContinuation { continuation = $0 } },
+                                 present: { if $0 != nil { notices += 1 } },
+                                 notify: { _, _ in notices += 1; return true })
+        check.enabled = true
+        let task = Task { await check.run(force: true) }
+        while continuation == nil { await Task.yield() }
+        check.apply(enabled: false)
+        continuation?.resume(returning: ["v99.0.0"])
+        await task.value
+        #expect(notices == 0)
+        #expect(check.status == .idle)
+        #expect(check.lastCheck == nil)
+    }
+
+    @Test func disablingDuringPermissionPreventsDelivery() async {
+        var permission: CheckedContinuation<Bool, Never>?
+        var delivered = false
+        let defaults = UserDefaults(suiteName: "release-permission-\(UUID())")!
+        let check = ReleaseCheck(defaults: defaults, fetchTags: { ["v99.0.0"] }, present: { _ in },
+                                 notify: { _, isCurrent in
+            let granted = await withCheckedContinuation { permission = $0 }
+            delivered = granted && isCurrent()
+            return delivered
+        })
+        check.enabled = true
+        let task = Task { await check.run(force: true) }
+        while permission == nil { await Task.yield() }
+        check.apply(enabled: false)
+        permission?.resume(returning: true)
+        await task.value
+        #expect(!delivered)
+        #expect(defaults.string(forKey: "ReleaseCheckNotified") == nil)
+    }
+
+    @Test func notificationFailureRemainsRetryableAndSuccessIsRecorded() async {
+        var succeed = false
+        var attempts = 0
+        let defaults = UserDefaults(suiteName: "release-delivery-\(UUID())")!
+        let check = ReleaseCheck(defaults: defaults, fetchTags: { ["v99.0.0"] }, present: { _ in },
+                                 notify: { _, isCurrent in attempts += 1; return succeed && isCurrent() })
+        check.enabled = true
+        await check.run(force: true)
+        #expect(defaults.string(forKey: "ReleaseCheckNotified") == nil)
+        succeed = true
+        await check.run(force: true)
+        await check.run(force: true)
+        #expect(attempts == 2)
+        #expect(defaults.string(forKey: "ReleaseCheckNotified") == "v99.0.0")
     }
 }

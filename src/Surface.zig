@@ -941,6 +941,14 @@ pub fn needsConfirmQuit(self: *Surface) bool {
     };
 }
 
+/// True only when shell integration identifies an empty command input.
+pub fn promptReady(self: *Surface) bool {
+    if (self.child_exited or self.readonly) return false;
+    self.renderer_state.mutex.lock();
+    defer self.renderer_state.mutex.unlock();
+    return self.io.terminal.isAtEmptyShellPrompt();
+}
+
 /// Called from the app thread to handle mailbox messages to our specific
 /// surface.
 pub fn handleMessage(self: *Surface, msg: Message) !void {

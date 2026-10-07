@@ -92,6 +92,13 @@ extension Ghostty {
             ghostty_surface_mouse_captured(surface)
         }
 
+        /// Whether shell integration identifies an empty command input region.
+        /// Unsupported integration and multiline drafts fail closed.
+        @MainActor
+        var isAtEmptyShellPrompt: Bool {
+            ghostty_surface_prompt_ready(surface)
+        }
+
         /// The PID of the foreground process group attached to the PTY.
         @MainActor
         var foregroundPID: Int? {

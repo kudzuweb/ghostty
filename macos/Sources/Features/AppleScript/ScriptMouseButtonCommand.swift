@@ -64,6 +64,7 @@ final class ScriptMouseButtonCommand: NSScriptCommand {
             button: button.ghosttyButton,
             mods: mods
         )
+        surfaceView.noteUserInput()
         surface.sendMouseButton(mouseEvent)
 
         return nil

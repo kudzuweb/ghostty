@@ -90,6 +90,7 @@ class TerminalWindow: NSWindow {
         didSet {
             guard keepAlive != oldValue else { return }
             keepAliveGaveUp = false
+            KeepAlive.shared.authorizationDidChange()
             invalidateRestorableState()
             NotificationCenter.default.post(name: .terminalTabsDidChange, object: nil)
         }

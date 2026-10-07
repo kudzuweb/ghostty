@@ -35,6 +35,7 @@ final class ScriptInputTextCommand: NSScriptCommand {
             return nil
         }
 
+        surfaceView.noteUserInput()
         surface.sendText(text)
         return nil
     }

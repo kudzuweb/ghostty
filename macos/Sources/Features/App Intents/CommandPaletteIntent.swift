@@ -34,6 +34,7 @@ struct CommandPaletteIntent: AppIntent {
             throw GhosttyIntentError.surfaceNotFound
         }
 
+        terminal.surfaceView?.noteUserInput()
         let performed = surface.perform(action: command.action)
         return .result(value: performed)
     }

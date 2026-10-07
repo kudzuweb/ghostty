@@ -37,9 +37,29 @@ enum TerminalTabGroupStore {
     }
 
     /// Carries a group's color and collapsed state over to its new name.
-    static func rename(_ name: String, to newName: String) {
+    @discardableResult
+    static func rename(_ name: String, to newName: String) -> Bool {
+        guard newName != name else { return true }
+        removePresentationIfUnused(newName)
+        let colors = UserDefaults.standard.dictionary(forKey: colorsKey) ?? [:]
+        guard canRename(name, to: newName, occupied: Set(colors.keys).union(UserDefaults.standard.stringArray(forKey: collapsedKey) ?? [])) else { return false }
         setColor(color(for: name), for: newName)
         setCollapsed(isCollapsed(name), for: newName)
+        return true
+    }
+
+    /// Obsolete labels must not permanently reserve names. Shared live groups keep their data.
+    static func removePresentationIfUnused(_ name: String, referencedNames: Set<String>? = nil) {
+        let references = referencedNames ?? Set(NSApp.windows.compactMap { ($0 as? TerminalWindow)?.tabGroupName })
+        guard !references.contains(name) else { return }
+        var colors = UserDefaults.standard.dictionary(forKey: colorsKey) ?? [:]
+        colors.removeValue(forKey: name)
+        UserDefaults.standard.set(colors, forKey: colorsKey)
+        setCollapsed(false, for: name)
+    }
+
+    static func canRename(_ name: String, to newName: String, occupied: Set<String>) -> Bool {
+        name == newName || (!newName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && !occupied.contains(newName))
     }
 
     static func isCollapsed(_ name: String) -> Bool {

@@ -1594,6 +1594,11 @@ pub const CAPI = struct {
         return surface.core_surface.needsConfirmQuit();
     }
 
+    /// Returns true only for a known, empty shell command input region.
+    export fn ghostty_surface_prompt_ready(surface: *Surface) bool {
+        return surface.core_surface.promptReady();
+    }
+
     /// Returns true if the surface process has exited.
     export fn ghostty_surface_process_exited(surface: *Surface) bool {
         return surface.core_surface.child_exited;

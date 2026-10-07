@@ -6,6 +6,7 @@ import GhosttyKit
 // shells in new tabs don't inherit it. This must run before ghostty_init and
 // before any surface or pty exists.
 Ghostty.stripAgentEnvironment()
+Ghostty.configureForkProfile()
 
 // Initialize Ghostty global state. We do this once right away because the
 // CLI APIs require it and it lets us ensure it is done immediately for the

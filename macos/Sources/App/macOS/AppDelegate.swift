@@ -201,6 +201,7 @@ class AppDelegate: NSObject,
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        AgentSessionRecovery.shared.start()
         // System settings overrides
         UserDefaults.ghostty.register(defaults: [
             // Disable this so that repeated key events make it through to our terminal views.
@@ -372,6 +373,7 @@ class AppDelegate: NSObject,
     }
 
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        AgentSessionRecovery.shared.saveCheckpoint()
         let windows = NSApplication.shared.windows
 
         // Window state is only saved again for windows marked as changed. Mark them all, so the
@@ -436,6 +438,7 @@ class AppDelegate: NSObject,
     }
 
     func applicationWillTerminate(_ notification: Notification) {
+        AgentSessionRecovery.shared.stop()
         SleepGuard.shared.willTerminate()
         KeepAlive.shared.willTerminate()
 
@@ -764,6 +767,7 @@ class AppDelegate: NSObject,
             SleepGuard.shared.apply(config)
             KeepAlive.shared.apply(config)
             ReleaseCheck.shared.apply(enabled: config.releaseCheck)
+            NotificationCenter.default.post(name: .forkConfigDidChange, object: nil)
         }
 
         // Update the config we need to store
@@ -779,27 +783,9 @@ class AppDelegate: NSObject,
         default: UserDefaults.ghostty.removeObject(forKey: "NSQuitAlwaysKeepsWindows")
         }
 
-        // Sync our auto-update settings. If SUEnableAutomaticChecks (in our Info.plist) is
-        // explicitly false (NO), auto-updates are disabled. Otherwise, we use the behavior
-        // defined by our "auto-update" configuration (if set) or fall back to Sparkle
-        // user-based defaults.
-        if Bundle.main.infoDictionary?["SUEnableAutomaticChecks"] as? Bool == false {
-            updateController.updater.automaticallyChecksForUpdates = false
-            updateController.updater.automaticallyDownloadsUpdates = false
-        } else if let autoUpdate = config.autoUpdate {
-            updateController.updater.automaticallyChecksForUpdates =
-                autoUpdate == .check || autoUpdate == .download
-            updateController.updater.automaticallyDownloadsUpdates =
-                autoUpdate == .download
-            /*
-             To test `auto-update` easily, uncomment the line below and
-             delete `SUEnableAutomaticChecks` in Ghostty-Info.plist.
+        // Fork updates are informational only. Never initialize a stock installer.
+        updateController.startUpdater()
 
-             Note: When `auto-update = download`, you may need to
-             `Clean Build Folder` if a background install has already begun.
-             */
-            // updateController.updater.checkForUpdatesInBackground()
-        }
 
         // Config could change keybindings, so update everything that depends on that
         syncMenuShortcuts(config)

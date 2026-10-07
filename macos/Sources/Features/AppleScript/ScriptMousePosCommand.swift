@@ -58,6 +58,7 @@ final class ScriptMousePosCommand: NSScriptCommand {
             y: y,
             mods: mods
         )
+        surfaceView.noteUserInput()
         surface.sendMousePos(mousePosEvent)
 
         return nil

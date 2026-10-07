@@ -24,6 +24,38 @@ struct UsageCutoffTests {
             stamps: stamps.map(date), now: date(now), settings: settings, calendar: Self.calendar)
     }
 
+    @Test func civilWorkdayAcrossDSTTransitions() {
+        for (zone, now, expected) in [
+            ("America/New_York", "2026-03-08T14:30:00Z", "2026-03-09T14:00:00Z"),
+            ("America/New_York", "2026-11-01T14:30:00Z", "2026-11-01T15:00:00Z"),
+            ("Australia/Lord_Howe", "2026-10-03T23:15:00Z", "2026-10-04T23:00:00Z")
+        ] {
+            var calendar = Calendar(identifier: .gregorian)
+            calendar.timeZone = TimeZone(identifier: zone)!
+            #expect(UsageCutoff.workday(after: UsageCutoff.parse(now)!, workdayMinutes: 600, calendar: calendar)
+                    == UsageCutoff.parse(expected)!)
+        }
+    }
+
+    @Test func transcriptRequiresTopLevelAssistantRegardlessOfSpacing() {
+        let text = #"{"type": "assistant", "timestamp":"2026-10-07T01:00:00Z"}"# + "\n"
+            + #"{"type":"user","message":{"type":"assistant"},"timestamp":"2026-10-07T02:00:00Z"}"#
+        #expect(UsageCutoff.timestamps(inTranscript: Data(text.utf8)) == [UsageCutoff.parse("2026-10-07T01:00:00Z")!])
+    }
+
+    @Test func reachedHoldSurvivesMissingDataMovedEstimateAndRestart() throws {
+        let now = date("08T08:00")
+        let morning = date("08T10:00")
+        var hold = UsageCutoff.Hold()
+        #expect(hold.resolve(computed: now, now: now, workday: morning, warning: 1500)?.phase == .reached)
+        #expect(hold.resolve(computed: nil, now: now, workday: morning, warning: 1500)?.phase == .reached)
+        #expect(hold.resolve(computed: date("08T09:00"), now: now, workday: morning, warning: 1500)?.cutoff == now)
+        hold = try JSONDecoder().decode(UsageCutoff.Hold.self, from: JSONEncoder().encode(hold))
+        #expect(hold.resolve(computed: nil, now: now, workday: morning, warning: 1500)?.phase == .reached)
+        #expect(hold.resolve(computed: nil, now: morning, workday: date("09T10:00"), warning: 1500) == nil)
+        #expect(hold.workday == nil)
+    }
+
     @Test func noStampsMeansNoCutoff() {
         #expect(cutoff(now: "07T22:00", stamps: []) == nil)
     }

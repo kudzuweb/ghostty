@@ -971,6 +971,7 @@ class BaseTerminalController: NSWindowController,
     }
 
     func performAction(_ action: String, on surfaceView: Ghostty.SurfaceView) {
+        surfaceView.noteUserInput()
         guard let surface = surfaceView.surface else { return }
         let len = action.utf8CString.count
         if len == 0 { return }

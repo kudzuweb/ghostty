@@ -5,6 +5,42 @@ const Allocator = std.mem.Allocator;
 const ArenaAllocator = std.heap.ArenaAllocator;
 const file_load = @import("file_load.zig");
 
+/// Shared with the Swift fork profile bootstrap; replaces all default roots.
+pub const fork_config_file_key = "GHOSTTY_FORK_CONFIG_FILE";
+
+/// Validate an explicit profile path without consulting process-global state.
+/// An invalid override must never fall back to the daily configuration.
+pub fn validateForkConfigPath(value: ?[]const u8) !?[]const u8 {
+    const path = value orelse return null;
+    if (path.len == 0 or !std.fs.path.isAbsolute(path) or
+        std.mem.indexOfScalar(u8, path, 0) != null) return error.InvalidForkConfigPath;
+    return path;
+}
+
+/// Caller owns the returned path, if the explicit fork profile is configured.
+pub fn forkConfigPath(alloc: Allocator) !?[]const u8 {
+    const value = std.process.getEnvVarOwned(alloc, fork_config_file_key) catch |err| switch (err) {
+        error.EnvironmentVariableNotFound => return null,
+        else => return err,
+    };
+    errdefer alloc.free(value);
+    _ = try validateForkConfigPath(value);
+    return value;
+}
+
+/// Per-profile cache paths belong beside the explicit config file, including
+/// its filename so profiles sharing a directory do not share a cache.
+pub fn forkCachePathForConfig(alloc: Allocator, value: ?[]const u8, sub_path: []const u8) !?[]const u8 {
+    const path = (try validateForkConfigPath(value)) orelse return null;
+    return try std.fmt.allocPrint(alloc, "{s}.cache/{s}", .{ path, sub_path });
+}
+
+pub fn forkCachePath(alloc: Allocator, sub_path: []const u8) !?[]const u8 {
+    const config_path = (try forkConfigPath(alloc)) orelse return null;
+    defer alloc.free(config_path);
+    return try forkCachePathForConfig(alloc, config_path, sub_path);
+}
+
 /// The path to the configuration that should be opened for editing.
 ///
 /// On Linux, this will use the file at the XDG config path. This is the
@@ -50,6 +86,8 @@ pub fn openPath(alloc_gpa: Allocator) ![:0]const u8 {
 /// The allocator must be an arena allocator. No memory is freed by this
 /// function and the resulting path is not all the memory that is allocated.
 fn configPath(alloc_arena: Allocator) ![]const u8 {
+    if (try forkConfigPath(alloc_arena)) |path| return path;
+
     const paths: []const []const u8 = try configPathCandidates(alloc_arena);
     assert(paths.len > 0);
 
@@ -101,4 +139,24 @@ fn configPathCandidates(alloc_arena: Allocator) ![]const []const u8 {
     paths.appendAssumeCapacity(try file_load.legacyDefaultXdgPath(alloc_arena));
 
     return paths.items;
+}
+
+test "config: explicit fork profile path validation" {
+    const testing = std.testing;
+    try testing.expectEqual(@as(?[]const u8, null), try validateForkConfigPath(null));
+    try testing.expectEqualStrings("/tmp/isolated/config", (try validateForkConfigPath("/tmp/isolated/config")).?);
+    try testing.expectError(error.InvalidForkConfigPath, validateForkConfigPath(""));
+    try testing.expectError(error.InvalidForkConfigPath, validateForkConfigPath("relative/config"));
+    try testing.expectError(error.InvalidForkConfigPath, validateForkConfigPath("/tmp/config\x00other"));
+}
+
+test "config: explicit fork profile cache path selection" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+    try testing.expectEqual(@as(?[]const u8, null), try forkCachePathForConfig(alloc, null, "sentry"));
+    const path = (try forkCachePathForConfig(alloc, "/tmp/profile/config", "sentry")).?;
+    defer alloc.free(path);
+    try testing.expectEqualStrings("/tmp/profile/config.cache/sentry", path);
+    try testing.expectError(error.InvalidForkConfigPath, forkCachePathForConfig(alloc, "", "sentry"));
+    try testing.expectError(error.InvalidForkConfigPath, forkCachePathForConfig(alloc, "relative/config", "sentry"));
 }

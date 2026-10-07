@@ -1,6 +1,11 @@
 import AppKit
 import SwiftUI
 
+protocol TerminalSidebarDropDestination {
+    var sidebarDropTarget: Ghostty.SurfaceView? { get }
+    var representsSidebarTab: Bool { get }
+}
+
 /// Use this container to achieve a glass effect at the window level.
 /// Modifying `NSThemeFrame` can sometimes be unpredictable.
 class TerminalViewContainer: NSView {
@@ -69,12 +74,21 @@ class TerminalViewContainer: NSView {
     // A terminal surface accepts drops over its own area. Everywhere else in the window,
     // such as the tab sidebar, lands here and goes to the window's focused surface.
 
-    private var dropTarget: Ghostty.SurfaceView? {
-        (window?.windowController as? BaseTerminalController)?.focusedSurface
+    private func dropTarget(at point: NSPoint) -> Ghostty.SurfaceView? {
+        func find(in view: NSView) -> (any TerminalSidebarDropDestination)? {
+            guard !view.isHidden, view.bounds.contains(view.convert(point, from: self)) else { return nil }
+            for child in view.subviews.reversed() {
+                if let target = find(in: child) { return target }
+            }
+            guard let destination = view as? TerminalSidebarDropDestination, destination.representsSidebarTab else { return nil }
+            return destination
+        }
+        if let destination = find(in: terminalView) { return destination.sidebarDropTarget }
+        return (window?.windowController as? BaseTerminalController)?.focusedSurface
     }
 
     override func draggingEntered(_ sender: any NSDraggingInfo) -> NSDragOperation {
-        guard let target = dropTarget else { return [] }
+        guard let target = dropTarget(at: convert(sender.draggingLocation, from: nil)) else { return [] }
         return target.draggingEntered(sender)
     }
 
@@ -83,9 +97,10 @@ class TerminalViewContainer: NSView {
     }
 
     override func performDragOperation(_ sender: any NSDraggingInfo) -> Bool {
-        guard let target = dropTarget else { return false }
+        guard let target = dropTarget(at: convert(sender.draggingLocation, from: nil)) else { return false }
         guard target.insertDropped(from: sender.draggingPasteboard) else { return false }
-        (window?.windowController as? BaseTerminalController)?.focusSurface(target)
+        target.window?.makeKeyAndOrderFront(nil)
+        (target.window?.windowController as? BaseTerminalController)?.focusSurface(target)
         return true
     }
 

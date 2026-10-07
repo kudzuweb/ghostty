@@ -13,6 +13,9 @@ extension Ghostty {
         /// Unique ID per surface
         let id: UUID
 
+        private(set) var userInputGeneration: UInt64 = 0
+        func noteUserInput() { userInputGeneration &+= 1 }
+
         // The current title of the surface as defined by the pty. This can be
         // changed with escape codes. This is public because the callbacks go
         // to the app level and it is set from there.
@@ -274,6 +277,7 @@ extension Ghostty {
             // is non-zero so that our layer bounds are non-zero so that our renderer
             // can do SOMETHING.
             super.init(frame: NSRect(x: 0, y: 0, width: 800, height: 600))
+            AgentSessionRecovery.shared.register(self)
 
             // Our cache of screen data
             cachedScreenContents = .init(duration: .milliseconds(500)) { [weak self] in
@@ -877,6 +881,7 @@ extension Ghostty {
         }
 
         override func mouseDown(with event: NSEvent) {
+            noteUserInput()
             guard let surface = self.surface else { return }
             let mods = Ghostty.ghosttyMods(event.modifierFlags)
             ghostty_surface_mouse_button(surface, GHOSTTY_MOUSE_PRESS, GHOSTTY_MOUSE_LEFT, mods)
@@ -903,6 +908,7 @@ extension Ghostty {
         }
 
         override func otherMouseDown(with event: NSEvent) {
+            noteUserInput()
             guard let surface = self.surface else { return }
             let mods = Ghostty.ghosttyMods(event.modifierFlags)
             let button = Ghostty.Input.MouseButton(fromNSEventButtonNumber: event.buttonNumber)
@@ -917,6 +923,7 @@ extension Ghostty {
         }
 
         override func rightMouseDown(with event: NSEvent) {
+            noteUserInput()
             guard let surface = self.surface else { return super.rightMouseDown(with: event) }
 
             let mods = Ghostty.ghosttyMods(event.modifierFlags)
@@ -1032,6 +1039,7 @@ extension Ghostty {
         }
 
         override func scrollWheel(with event: NSEvent) {
+            noteUserInput()
             guard let surfaceModel else { return }
 
             var x = event.scrollingDeltaX
@@ -1075,6 +1083,7 @@ extension Ghostty {
         }
 
         override func keyDown(with event: NSEvent) {
+            noteUserInput()
             guard let surface = self.surface else {
                 self.interpretKeyEvents([event])
                 return
@@ -1491,6 +1500,32 @@ extension Ghostty {
 
             let menu = NSMenu()
 
+            if let state = AgentSessionRecovery.shared.status(for: id),
+               state.phase == .pending || state.phase == .failed || state.phase == .launching {
+                let surfaces = (window?.windowController as? BaseTerminalController).map { Array($0.surfaceTree) } ?? []
+                let ordinal = (surfaces.firstIndex(where: { $0.id == id }) ?? 0) + 1
+                let label = TerminalRecoveryPresentation.label(ordinal: ordinal, binding: state.binding)
+                let heading = NSMenuItem(title: "Saved resume: \(label)", action: nil, keyEquivalent: "")
+                heading.isEnabled = false
+                menu.addItem(heading)
+                let summary = NSMenuItem(title: state.reason ?? "Waiting to resume this terminal", action: nil, keyEquivalent: "")
+                summary.isEnabled = false
+                menu.addItem(summary)
+                if state.binding != nil, state.phase != .launching {
+                    let retry = menu.addItem(withTitle: "Retry resume in this terminal",
+                                             action: #selector(retrySavedAgentResume(_:)), keyEquivalent: "")
+                    retry.target = self
+                } else if state.binding == nil {
+                    let explanation = NSMenuItem(title: "No saved session is known for this terminal", action: nil, keyEquivalent: "")
+                    explanation.isEnabled = false
+                    menu.addItem(explanation)
+                }
+                let forget = menu.addItem(withTitle: "Forget saved resume",
+                                          action: #selector(forgetSavedAgentResume(_:)), keyEquivalent: "")
+                forget.target = self
+                menu.addItem(.separator())
+            }
+
             // We just use a floating var so we can easily setup metadata on each item
             // in a row without storing it all.
             var item: NSMenuItem
@@ -1529,6 +1564,14 @@ extension Ghostty {
 
         // MARK: Menu Handlers
 
+        @IBAction func retrySavedAgentResume(_ sender: Any?) {
+            AgentSessionRecovery.shared.retry(surfaceID: id)
+        }
+
+        @IBAction func forgetSavedAgentResume(_ sender: Any?) {
+            AgentSessionRecovery.shared.dismiss(surfaceID: id)
+        }
+
         @IBAction func copy(_ sender: Any?) {
             guard let surface = self.surface else { return }
             let action = "copy_to_clipboard"
@@ -1538,6 +1581,7 @@ extension Ghostty {
         }
 
         @IBAction func paste(_ sender: Any?) {
+            noteUserInput()
             guard let surface = self.surface else { return }
             let action = "paste_from_clipboard"
             if !ghostty_surface_binding_action(surface, action, UInt(action.lengthOfBytes(using: .utf8))) {
@@ -1546,6 +1590,7 @@ extension Ghostty {
         }
 
         @IBAction func pasteAsPlainText(_ sender: Any?) {
+            noteUserInput()
             guard let surface = self.surface else { return }
             let action = "paste_from_clipboard"
             if !ghostty_surface_binding_action(surface, action, UInt(action.lengthOfBytes(using: .utf8))) {
@@ -1554,6 +1599,7 @@ extension Ghostty {
         }
 
         @IBAction func pasteSelection(_ sender: Any?) {
+            noteUserInput()
             guard let surface = self.surface else { return }
             let action = "paste_from_selection"
             if !ghostty_surface_binding_action(surface, action, UInt(action.lengthOfBytes(using: .utf8))) {
@@ -1767,6 +1813,7 @@ extension Ghostty {
             case title
             case isUserSetTitle
             case resumeCommand
+            case recovery
         }
 
         required convenience init(from decoder: Decoder) throws {
@@ -1782,15 +1829,17 @@ extension Ghostty {
             var config = Ghostty.SurfaceConfiguration()
             config.workingDirectory = try container.decode(String?.self, forKey: .pwd)
 
-            // A Claude Code or Codex session was running when the window was saved, so
-            // type the command that resumes it into the restored shell.
-            if let resumeCommand = try container.decodeIfPresent(String.self, forKey: .resumeCommand) {
-                config.initialInput = resumeCommand + "\n"
-            }
+            let recovery = try container.decodeIfPresent(AgentSessionRecoveryRecord.self, forKey: .recovery)
+            let legacy = try container.decodeIfPresent(String.self, forKey: .resumeCommand)
+            let migrated = legacy.flatMap {
+                AgentSessionBinding.legacy($0, cwd: config.workingDirectory,
+                                           home: FileManager.default.homeDirectoryForCurrentUser.path)
+            }.map { AgentSessionRecoveryRecord(binding: $0, phase: .pending, reason: nil) }
             let savedTitle = try container.decodeIfPresent(String.self, forKey: .title)
             let isUserSetTitle = try container.decodeIfPresent(Bool.self, forKey: .isUserSetTitle) ?? false
 
             self.init(app, baseConfig: config, uuid: uuid)
+            AgentSessionRecovery.shared.register(self, restored: recovery ?? migrated, legacyArchive: recovery == nil)
 
             // Restore the saved title after initialization
             if let title = savedTitle {
@@ -1808,9 +1857,7 @@ extension Ghostty {
             try container.encode(id.uuidString, forKey: .uuid)
             try container.encode(title, forKey: .title)
             try container.encode(titleFromTerminal != nil, forKey: .isUserSetTitle)
-            if let pid = surfaceModel?.foregroundPID {
-                try container.encodeIfPresent(AgentSessionResume.command(forProcess: pid), forKey: .resumeCommand)
-            }
+            try container.encodeIfPresent(AgentSessionRecovery.shared.status(for: id), forKey: .recovery)
         }
     }
 }
@@ -1968,6 +2015,7 @@ extension Ghostty.SurfaceView: NSTextInputClient {
     }
 
     func insertText(_ string: Any, replacementRange: NSRange) {
+        noteUserInput()
         // We must have an associated event
         guard NSApp.currentEvent != nil else { return }
         guard let surfaceModel else { return }
@@ -2127,6 +2175,14 @@ extension Ghostty.SurfaceView: NSServicesMenuRequestor {
 extension Ghostty.SurfaceView: NSMenuItemValidation {
     func validateMenuItem(_ item: NSMenuItem) -> Bool {
         switch item.action {
+        case #selector(retrySavedAgentResume):
+            guard let state = AgentSessionRecovery.shared.status(for: id) else { return false }
+            return state.binding != nil && (state.phase == .pending || state.phase == .failed)
+
+        case #selector(forgetSavedAgentResume):
+            guard let state = AgentSessionRecovery.shared.status(for: id) else { return false }
+            return state.phase == .pending || state.phase == .failed || state.phase == .launching
+
         case #selector(pasteSelection):
             let pb = NSPasteboard.ghosttySelection
             guard let str = pb.getOpinionatedStringContents() else { return false }
@@ -2196,12 +2252,9 @@ extension Ghostty.SurfaceView {
         }
 
         if let content {
-            DispatchQueue.main.async {
-                self.insertText(
-                    content,
-                    replacementRange: NSRange(location: 0, length: 0)
-                )
-            }
+            // Drop handlers already run on the main actor. Submit immediately so
+            // insertText records input generation before a queued recovery action.
+            self.insertText(content, replacementRange: NSRange(location: 0, length: 0))
             return true
         }
 

@@ -69,6 +69,7 @@ final class ScriptKeyEventCommand: NSScriptCommand {
             action: action,
             mods: mods
         )
+        surfaceView.noteUserInput()
         surface.sendKeyEvent(keyEvent)
 
         return nil

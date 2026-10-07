@@ -52,6 +52,8 @@ private struct ForkSettingsView: View {
         VStack(alignment: .leading, spacing: 0) {
             ScrollView {
                 VStack(alignment: .leading, spacing: 24) {
+                    Text("Editing: \(ConfigFile.path ?? "No editable configuration root")\nControls show applied values after reload. Theme comes from this file; included files and command-line settings can override it.")
+                        .font(.caption).foregroundStyle(.secondary).textSelection(.enabled)
                     AppearanceSection()
                     Divider()
                     SleepGuardSection()
@@ -74,11 +76,12 @@ private struct ForkSettingsView: View {
 // MARK: Appearance
 
 private struct AppearanceSection: View {
+    @State private var refresh = ForkSettingsRefresh()
     @State private var currentTheme: String = ConfigFile.value(of: "theme") ?? ""
     @State private var search = ""
     @State private var errorMessage: String?
 
-    private let themes = ThemeCatalog.names()
+    @State private var themes = ThemeCatalog.names()
 
     private var filtered: [String] {
         let query = search.trimmingCharacters(in: .whitespaces)
@@ -134,6 +137,13 @@ private struct AppearanceSection: View {
             }
             .font(.callout)
         }
+        .onAppear(perform: load)
+        .onReceive(NotificationCenter.default.publisher(for: .forkConfigDidChange)) { _ in load() }
+    }
+
+    private func load() {
+        currentTheme = refresh.value(current: currentTheme, latest: ConfigFile.value(of: "theme") ?? "", key: "theme")
+        themes = ThemeCatalog.names()
     }
 
     private func choose(_ name: String) {
@@ -175,6 +185,7 @@ private enum ThemeCatalog {
 // MARK: Sleep guard
 
 private struct SleepGuardSection: View {
+    @State private var refresh = ForkSettingsRefresh()
     @ObservedObject private var sleepGuard = SleepGuard.shared
     @State private var graceText: String = ""
     @State private var errorMessage: String?
@@ -206,9 +217,12 @@ private struct SleepGuardSection: View {
                 Text(errorMessage).font(.caption).foregroundStyle(.red)
             }
         }
-        .onAppear {
-            graceText = String(Int(sleepGuard.graceSeconds))
-        }
+        .onAppear(perform: load)
+        .onReceive(NotificationCenter.default.publisher(for: .forkConfigDidChange)) { _ in load() }
+    }
+
+    private func load() {
+        graceText = refresh.value(current: graceText, latest: String(Int(sleepGuard.graceSeconds)), key: "graceText")
     }
 
     private func commitGrace() {
@@ -223,6 +237,7 @@ private struct SleepGuardSection: View {
 // MARK: Keep alive
 
 private struct KeepAliveSection: View {
+    @State private var refresh = ForkSettingsRefresh()
     @State private var maxCrashes = ""
     @State private var serverInterval = ""
     @State private var rateInterval = ""
@@ -280,6 +295,7 @@ private struct KeepAliveSection: View {
             }
         }
         .onAppear(perform: load)
+        .onReceive(NotificationCenter.default.publisher(for: .forkConfigDidChange)) { _ in load() }
     }
 
     private func field(
@@ -302,12 +318,12 @@ private struct KeepAliveSection: View {
 
     private func load() {
         let settings = KeepAlive.shared.settings
-        maxCrashes = String(settings.maxCrashes)
-        serverInterval = ConfigFile.value(of: "keep-alive-server-error-interval") ?? "5m"
-        rateInterval = ConfigFile.value(of: "keep-alive-rate-limit-interval") ?? "15m"
-        eventsFile = ConfigFile.value(of: "keep-alive-events-file") ?? ""
-        background = settings.background
-        relaunchGhostty = settings.relaunchGhostty
+        maxCrashes = refresh.value(current: maxCrashes, latest: String(settings.maxCrashes), key: "maxCrashes")
+        serverInterval = refresh.value(current: serverInterval, latest: ForkSettingsRefresh.duration(settings.serverErrorInterval), key: "serverInterval")
+        rateInterval = refresh.value(current: rateInterval, latest: ForkSettingsRefresh.duration(settings.rateLimitInterval), key: "rateInterval")
+        eventsFile = refresh.value(current: eventsFile, latest: settings.eventsFile ?? "", key: "eventsFile")
+        background = refresh.value(current: background, latest: settings.background, key: "background")
+        relaunchGhostty = refresh.value(current: relaunchGhostty, latest: settings.relaunchGhostty, key: "relaunchGhostty")
     }
 
     private func set(_ key: String, _ value: String) {
@@ -328,6 +344,7 @@ private struct KeepAliveSection: View {
 // MARK: Usage cutoff and overnight
 
 private struct UsageCutoffSection: View {
+    @State private var refresh = ForkSettingsRefresh()
     @ObservedObject private var keepAlive = KeepAlive.shared
     @State private var enabled = false
     @State private var stopSessions = false
@@ -396,6 +413,7 @@ private struct UsageCutoffSection: View {
             }
         }
         .onAppear(perform: load)
+        .onReceive(NotificationCenter.default.publisher(for: .forkConfigDidChange)) { _ in load() }
     }
 
     private func field(
@@ -417,13 +435,13 @@ private struct UsageCutoffSection: View {
 
     private func load() {
         let settings = KeepAlive.shared.settings
-        enabled = settings.usageCutoff
-        stopSessions = settings.cutoffStopSessions
-        workdayStart = ConfigFile.value(of: "usage-cutoff-workday-start") ?? "10:00"
-        usable = ConfigFile.value(of: "usage-cutoff-usable") ?? "2h"
-        latestReset = ConfigFile.value(of: "usage-cutoff-latest-reset") ?? "2h"
-        margin = ConfigFile.value(of: "usage-cutoff-margin") ?? "15m"
-        warning = ConfigFile.value(of: "usage-cutoff-warning") ?? "25m"
+        enabled = refresh.value(current: enabled, latest: settings.usageCutoff, key: "enabled")
+        stopSessions = refresh.value(current: stopSessions, latest: settings.cutoffStopSessions, key: "stopSessions")
+        workdayStart = refresh.value(current: workdayStart, latest: String(format: "%02d:%02d", settings.cutoff.workdayMinutes / 60, settings.cutoff.workdayMinutes % 60), key: "workdayStart")
+        usable = refresh.value(current: usable, latest: ForkSettingsRefresh.duration(settings.cutoff.usable), key: "usable")
+        latestReset = refresh.value(current: latestReset, latest: ForkSettingsRefresh.duration(settings.cutoff.latestReset), key: "latestReset")
+        margin = refresh.value(current: margin, latest: ForkSettingsRefresh.duration(settings.cutoff.margin), key: "margin")
+        warning = refresh.value(current: warning, latest: ForkSettingsRefresh.duration(settings.cutoffWarning), key: "warning")
     }
 
     private func set(_ key: String, _ value: String) {
@@ -445,6 +463,7 @@ private struct UsageCutoffSection: View {
 // MARK: Release check
 
 private struct ReleaseCheckSection: View {
+    @State private var refresh = ForkSettingsRefresh()
     @ObservedObject private var check = ReleaseCheck.shared
     @State private var enabled = ReleaseCheck.shared.enabled
     @State private var errorMessage: String?
@@ -482,7 +501,7 @@ private struct ReleaseCheckSection: View {
 
             HStack {
                 Button("Check now") { check.checkNow() }
-                    .disabled(!enabled || check.status == .checking)
+                    .disabled(check.status == .checking)
                 if let statusText {
                     Text(statusText).font(.caption).foregroundStyle(.secondary)
                 }
@@ -491,6 +510,12 @@ private struct ReleaseCheckSection: View {
                 Text(errorMessage).font(.caption).foregroundStyle(.red)
             }
         }
+        .onAppear(perform: load)
+        .onReceive(NotificationCenter.default.publisher(for: .forkConfigDidChange)) { _ in load() }
+    }
+
+    private func load() {
+        enabled = refresh.value(current: enabled, latest: check.enabled, key: "enabled")
     }
 }
 
@@ -500,7 +525,7 @@ private struct FooterBar: View {
     var body: some View {
         HStack {
             Button("Open config file") {
-                Ghostty.App.openConfig()
+                if let path = ConfigFile.path { NSWorkspace.shared.open(URL(fileURLWithPath: path)) }
             }
             Button("Fork notes") {
                 if let url = Self.forkNotes { NSWorkspace.shared.open(url) }
@@ -508,5 +533,25 @@ private struct FooterBar: View {
             Spacer()
         }
         .padding(12)
+    }
+}
+
+/// A reload updates untouched fields while preserving edits still awaiting Return.
+/// Keeping view identity intact also preserves search, focus and scroll position.
+struct ForkSettingsRefresh {
+    private var previous: [String: Any] = [:]
+
+    static func duration(_ seconds: TimeInterval) -> String {
+        let milliseconds = Int((seconds * 1000).rounded())
+        if milliseconds % 3_600_000 == 0 { return "\(milliseconds / 3_600_000)h" }
+        if milliseconds % 60_000 == 0 { return "\(milliseconds / 60_000)m" }
+        if milliseconds % 1000 == 0 { return "\(milliseconds / 1000)s" }
+        return "\(milliseconds)ms"
+    }
+
+    mutating func value<Value: Equatable>(current: Value, latest: Value, key: String) -> Value {
+        let baseline = previous[key] as? Value
+        previous[key] = latest
+        return baseline == nil || current == baseline ? latest : current
     }
 }

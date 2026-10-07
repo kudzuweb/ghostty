@@ -225,7 +225,7 @@ class TemporaryConfig: Ghostty.Config {
             .appendingPathExtension("ghostty")
         try configText.write(to: temporaryFile, atomically: true, encoding: .utf8)
         self.temporaryFile = temporaryFile
-        super.init(config: Self.loadConfig(at: temporaryFile.path(), finalize: finalize))
+        super.init(config: Self.loadConfig(at: temporaryFile.path(), finalize: finalize, respectForkProfile: false))
     }
 
     var optionalAutoUpdateChannel: Ghostty.AutoUpdateChannel? {
@@ -240,5 +240,125 @@ class TemporaryConfig: Ghostty.Config {
 
     deinit {
         try? FileManager.default.removeItem(at: temporaryFile)
+    }
+}
+
+@MainActor
+struct ForkConfigWriteTests {
+    @Test func concurrentHandEditIsPreservedAndReported() throws {
+        let folder = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let config = folder.appendingPathComponent("config")
+        try "theme = original\n".write(to: config, atomically: true, encoding: .utf8)
+        let error = ConfigFile.set("theme", to: "panel", at: config.path, reload: false, beforeReplace: {
+            try "theme = original\nfont-size = 17\n".write(to: config, atomically: true, encoding: .utf8)
+        })
+        #expect(error?.contains("changed during this edit") == true)
+        #expect(try String(contentsOf: config, encoding: .utf8) == "theme = original\nfont-size = 17\n")
+    }
+
+    @Test func explicitConfigRootParsingKeepsMultipleRootsVisible() {
+        #expect(ConfigFile.explicitConfigPaths(["ghostty", "--config-file=/tmp/a"]) == ["/tmp/a"])
+        #expect(ConfigFile.explicitConfigPaths(["ghostty", "--config-file", "/tmp/a", "--config-file=/tmp/b"]) == ["/tmp/a", "/tmp/b"])
+    }
+}
+
+@MainActor
+struct ForkGroupRenameTests {
+    @Test func occupiedNameCannotMergePresentation() {
+        #expect(!TerminalTabGroupStore.canRename("A", to: "B", occupied: ["A", "B"]))
+        #expect(TerminalTabGroupStore.canRename("A", to: "C", occupied: ["A", "B"]))
+        #expect(TerminalTabGroupStore.canRename("A", to: "A", occupied: ["A", "B"]))
+        #expect(!TerminalTabGroupStore.canRename("A", to: "   ", occupied: []))
+    }
+}
+
+@MainActor
+struct ForkGroupRoundtripTests {
+    @Test func renameRoundtripReleasesTheOldName() {
+        let first = "roundtrip-A-\(UUID())"
+        let second = "roundtrip-B-\(UUID())"
+        defer {
+            TerminalTabGroupStore.removePresentationIfUnused(first, referencedNames: [])
+            TerminalTabGroupStore.removePresentationIfUnused(second, referencedNames: [])
+        }
+        TerminalTabGroupStore.setColor(.purple, for: first)
+        TerminalTabGroupStore.setCollapsed(true, for: first)
+        #expect(TerminalTabGroupStore.rename(first, to: second))
+        TerminalTabGroupStore.removePresentationIfUnused(first, referencedNames: [second])
+        #expect(TerminalTabGroupStore.color(for: second) == .purple)
+        #expect(TerminalTabGroupStore.isCollapsed(second))
+        #expect(!TerminalTabGroupStore.isCollapsed(first))
+        #expect(TerminalTabGroupStore.rename(second, to: first))
+        TerminalTabGroupStore.removePresentationIfUnused(second, referencedNames: [first])
+        #expect(TerminalTabGroupStore.color(for: first) == .purple)
+        #expect(TerminalTabGroupStore.isCollapsed(first))
+        #expect(!TerminalTabGroupStore.isCollapsed(second))
+    }
+
+    @Test func cleanupPreservesGloballyReferencedGroup() {
+        let name = "shared-\(UUID())"
+        defer { TerminalTabGroupStore.removePresentationIfUnused(name, referencedNames: []) }
+        TerminalTabGroupStore.setColor(.teal, for: name)
+        TerminalTabGroupStore.setCollapsed(true, for: name)
+        TerminalTabGroupStore.removePresentationIfUnused(name, referencedNames: [name])
+        #expect(TerminalTabGroupStore.color(for: name) == .teal)
+        #expect(TerminalTabGroupStore.isCollapsed(name))
+    }
+}
+
+struct ForkSettingsRefreshTests {
+    @Test func refreshPreservesPendingFieldAndUpdatesUntouchedField() {
+        var refresh = ForkSettingsRefresh()
+        #expect(refresh.value(current: "", latest: "5m", key: "interval") == "5m")
+        #expect(refresh.value(current: "", latest: "3", key: "crashes") == "3")
+        #expect(refresh.value(current: "20m", latest: "10m", key: "interval") == "20m")
+        #expect(refresh.value(current: "3", latest: "4", key: "crashes") == "4")
+        // Once the pending value is saved, a later external edit is visible again.
+        #expect(refresh.value(current: "20m", latest: "20m", key: "interval") == "20m")
+        #expect(refresh.value(current: "20m", latest: "30m", key: "interval") == "30m")
+    }
+}
+
+struct TerminalTabAttentionTests {
+    @Test func attentionRequiresAuthorizationAndOmitsPendingReceipts() {
+        let pending = KeepAlivePromptStatus(phase: .waiting, message: "Waiting")
+        let unavailable = KeepAlivePromptStatus(phase: .attention, message: "The agent bridge is unavailable")
+        let uncertain = KeepAlivePromptStatus(phase: .attention, message: "Check the agent; delivery is unconfirmed")
+        #expect(TerminalTabAttention.promptMessage([pending], authorized: true) == nil)
+        #expect(TerminalTabAttention.promptMessage([unavailable], authorized: false) == nil)
+        #expect(TerminalTabAttention.promptMessage([pending, unavailable, unavailable], authorized: true) == unavailable.message)
+        #expect(TerminalTabAttention.promptMessage([uncertain], authorized: true) == uncertain.message)
+    }
+}
+
+struct TerminalRecoveryPresentationTests {
+    @Test func splitLabelsIdentifyPositionToolAndSavedSession() {
+        let first = AgentSessionBinding(tool: .codex,
+                                       sessionID: UUID(uuidString: "00000000-0000-0000-0000-000000111111")!,
+                                       sessionRoot: "/tmp/codex", launchCWD: "/tmp/project")
+        let second = AgentSessionBinding(tool: .claude,
+                                        sessionID: UUID(uuidString: "00000000-0000-0000-0000-000000222222")!,
+                                        sessionRoot: "/tmp/claude", launchCWD: "/tmp/project")
+        #expect(TerminalRecoveryPresentation.label(ordinal: 1, binding: first) == "Terminal 1 · Codex …111111")
+        #expect(TerminalRecoveryPresentation.label(ordinal: 2, binding: second) == "Terminal 2 · Claude …222222")
+        #expect(TerminalRecoveryPresentation.label(ordinal: 2, binding: nil) == "Terminal 2 · No saved session")
+    }
+}
+
+@MainActor
+struct TerminalSidebarMenuDispatchTests {
+    @Test func retainedTargetDispatchesTheMenuItemThroughAppKit() {
+        var calls = 0
+        let item: NSMenuItem
+        do {
+            let model = TerminalTabSidebarModel()
+            item = model.menuItem("Test sidebar action") { calls += 1 }
+        }
+        #expect(item.target != nil)
+        #expect(item.action.map(NSStringFromSelector) == "invokeSidebarMenuAction:")
+        #expect(NSApplication.shared.sendAction(item.action!, to: item.target, from: item))
+        #expect(calls == 1)
     }
 }

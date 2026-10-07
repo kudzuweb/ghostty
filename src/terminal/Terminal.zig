@@ -1341,6 +1341,36 @@ pub fn cursorIsAtPrompt(self: *Terminal) bool {
     };
 }
 
+/// Conservative recovery readiness, based only on OSC 133 semantic regions.
+/// A continuation may contain a logical newline even when all its cells are
+/// blank, so multiline input fails closed. Scan beyond the cursor as editors
+/// can move it back over a draft. Unknown or incomplete integration is false.
+pub fn isAtEmptyShellPrompt(self: *Terminal) bool {
+    if (self.screens.active_key != .primary) return false;
+    const screen = self.screens.active;
+    if (!screen.semantic_prompt.seen or
+        screen.cursor.semantic_content != .input or
+        screen.cursor.page_row.semantic_prompt != .prompt) return false;
+
+    const cursor_pin = screen.cursor.page_pin.*;
+    var it = cursor_pin.rowIterator(.right_down, screen.pages.getBottomRight(.active));
+    var first = true;
+    while (it.next()) |pin| {
+        const rac = pin.rowAndCell();
+        if (!first) {
+            // An empty continuation is still a nonempty logical command.
+            if (rac.row.semantic_prompt == .prompt_continuation) return false;
+            break;
+        }
+        first = false;
+        for (pin.node.data.getCells(rac.row)) |cell| {
+            if (cell.semantic_content == .input and
+                (cell.hasText() or cell.wide != .narrow)) return false;
+        }
+    }
+    return !first;
+}
+
 /// Horizontal tab moves the cursor to the next tabstop, clearing
 /// the screen to the left the tabstop.
 pub fn horizontalTab(self: *Terminal) void {
@@ -13059,4 +13089,65 @@ test "Terminal: deleteLines wide char at right margin with full clear" {
     // and the orphaned spacer_tail at col 39 triggers a page integrity
     // violation in clearCells.
     try t.scrollUp(t.rows);
+}
+
+test "Terminal: empty shell prompt readiness lifecycle and drafts" {
+    const alloc = testing.allocator;
+    var t = try init(alloc, .{ .cols = 20, .rows = 6 });
+    defer t.deinit(alloc);
+
+    try testing.expect(!t.isAtEmptyShellPrompt());
+    try t.semanticPrompt(.init(.fresh_line_new_prompt)); // OSC 133 A
+    try t.printString("$ ");
+    try testing.expect(!t.isAtEmptyShellPrompt()); // prompt still being drawn
+    try t.semanticPrompt(.init(.end_prompt_start_input)); // OSC 133 B
+    try testing.expect(t.isAtEmptyShellPrompt());
+    try t.printString("draft");
+    t.cursorLeft(5);
+    try testing.expect(!t.isAtEmptyShellPrompt()); // text beyond the cursor
+    t.eraseChars(5);
+    try testing.expect(t.isAtEmptyShellPrompt());
+    try t.print(0x1F600); // wide Unicode
+    t.cursorLeft(2);
+    try testing.expect(!t.isAtEmptyShellPrompt());
+    t.eraseChars(2);
+    try t.print('e');
+    try t.print(0x0301); // combining grapheme
+    t.cursorLeft(1);
+    try testing.expect(!t.isAtEmptyShellPrompt());
+    t.eraseChars(1);
+    try t.print(' '); // whitespace is command input too
+    try testing.expect(!t.isAtEmptyShellPrompt());
+
+    try t.semanticPrompt(.init(.end_input_start_output)); // OSC 133 C
+    try testing.expect(!t.isAtEmptyShellPrompt());
+    try t.semanticPrompt(.init(.end_command)); // OSC 133 D
+    try testing.expect(!t.isAtEmptyShellPrompt());
+    try t.semanticPrompt(.init(.fresh_line_new_prompt));
+    try t.printString("$ ");
+    try t.semanticPrompt(.init(.end_prompt_start_input));
+    try testing.expect(t.isAtEmptyShellPrompt()); // old command does not poison readiness
+    try t.switchScreenMode(.@"1049", true);
+    try testing.expect(!t.isAtEmptyShellPrompt());
+    try t.semanticPrompt(.init(.fresh_line_new_prompt));
+    try t.semanticPrompt(.init(.end_prompt_start_input));
+    try testing.expect(!t.isAtEmptyShellPrompt());
+}
+
+test "Terminal: empty shell prompt readiness rejects multiline input" {
+    const alloc = testing.allocator;
+    var t = try init(alloc, .{ .cols = 20, .rows = 6 });
+    defer t.deinit(alloc);
+    try t.semanticPrompt(.init(.fresh_line_new_prompt));
+    try t.printString("$ ");
+    try t.semanticPrompt(.init(.end_prompt_start_input));
+    try t.printString("first");
+    t.carriageReturn();
+    try t.linefeed();
+    try testing.expect(!t.isAtEmptyShellPrompt()); // even a blank continuation
+    try t.printString("second");
+    t.cursorUp(1);
+    t.cursorLeft(4);
+    t.eraseChars(20);
+    try testing.expect(!t.isAtEmptyShellPrompt()); // continuation beyond cursor
 }

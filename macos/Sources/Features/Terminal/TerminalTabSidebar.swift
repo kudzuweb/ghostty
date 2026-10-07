@@ -19,6 +19,7 @@ final class TerminalTabSidebarModel: ObservableObject {
         /// The 1-based position of the tab in its window.
         let index: Int
         let title: String
+        let surfaceID: UUID?
         let keyEquivalent: String?
         let color: TerminalTabColor
         let isSelected: Bool
@@ -141,6 +142,7 @@ final class TerminalTabSidebarModel: ObservableObject {
                 id: ObjectIdentifier(tabWindow),
                 index: index,
                 title: tabWindow.title,
+                surfaceID: (tabWindow.windowController as? BaseTerminalController)?.surfaceTree.first(where: { _ in true })?.id,
                 keyEquivalent: shortcut.map { "\($0)" },
                 color: (tabWindow as? TerminalWindow)?.tabColor ?? .none,
                 // Our window is only on screen while it is the selected tab.
@@ -179,6 +181,26 @@ final class TerminalTabSidebarModel: ObservableObject {
 
     func newTab() {
         (window?.windowController as? TerminalController)?.newTab(nil)
+    }
+
+    func displayTitle(_ tab: Tab) -> String {
+        guard tabs.filter({ $0.title == tab.title }).count > 1, let id = tab.surfaceID else { return tab.title }
+        return "\(tab.title) · \(id.uuidString.prefix(6).lowercased())"
+    }
+
+    func dropTarget(for tab: Tab) -> Ghostty.SurfaceView? {
+        (tabWindow(for: tab)?.windowController as? BaseTerminalController)?.focusedSurface
+    }
+
+    func promptAttention(for tab: Tab) -> String? {
+        let authorized = (tabWindow(for: tab) as? TerminalWindow)?.keepAlive == true || KeepAlive.shared.overnightActive
+        let statuses = recoverySurfaces(for: tab).compactMap { KeepAlive.shared.promptStatuses[$0.id] }
+        return TerminalTabAttention.promptMessage(statuses, authorized: authorized)
+    }
+
+    func recoverySurfaces(for tab: Tab) -> [Ghostty.SurfaceView] {
+        guard let controller = tabWindow(for: tab)?.windowController as? BaseTerminalController else { return [] }
+        return Array(controller.surfaceTree)
     }
 
     func select(_ tab: Tab) {
@@ -262,10 +284,20 @@ final class TerminalTabSidebarModel: ObservableObject {
 
     func renameGroup(_ name: String, to newName: String) {
         guard newName != name else { return }
-        TerminalTabGroupStore.rename(name, to: newName)
+        let allWindows = NSApp.windows.compactMap { $0 as? TerminalWindow }
+        guard !allWindows.contains(where: { $0.tabGroupName == newName }),
+              !allWindows.contains(where: { $0.tabGroupName == name && !tabWindows.contains($0) }),
+              TerminalTabGroupStore.rename(name, to: newName) else {
+            let alert = NSAlert()
+            alert.messageText = "Couldn't rename group"
+            alert.informativeText = "Choose an unused name. A group shared with another window must be renamed there together, so its appearance stays consistent."
+            alert.runModal()
+            return
+        }
         for case let tabWindow as TerminalWindow in tabWindows where tabWindow.tabGroupName == name {
             tabWindow.tabGroupName = newName
         }
+        TerminalTabGroupStore.removePresentationIfUnused(name)
     }
 
     /// Asks for a name for a new group and moves the tab into it.
@@ -364,6 +396,41 @@ final class TerminalTabSidebarModel: ObservableObject {
         let menu = NSMenu()
         menu.autoenablesItems = false
 
+        for (offset, surface) in recoverySurfaces(for: tab).enumerated() {
+            guard let state = AgentSessionRecovery.shared.status(for: surface.id),
+                  state.phase == .pending || state.phase == .failed || state.phase == .launching else { continue }
+            let label = TerminalRecoveryPresentation.label(ordinal: offset + 1, binding: state.binding)
+            let section = NSMenuItem(title: label, action: nil, keyEquivalent: "")
+            let submenu = NSMenu(title: label)
+            submenu.autoenablesItems = false
+            let summary = NSMenuItem(title: state.reason ?? "Waiting to resume this terminal", action: nil, keyEquivalent: "")
+            summary.isEnabled = false
+            submenu.addItem(summary)
+            let id = surface.id
+            if state.binding == nil {
+                let explanation = NSMenuItem(title: "No saved session is known for this terminal", action: nil, keyEquivalent: "")
+                explanation.isEnabled = false
+                submenu.addItem(explanation)
+            } else if state.phase != .launching {
+                submenu.addItem(menuItem("Retry resume in this terminal", symbol: "arrow.clockwise") {
+                    AgentSessionRecovery.shared.retry(surfaceID: id)
+                })
+            }
+            submenu.addItem(menuItem("Forget saved resume", symbol: "xmark.circle") {
+                AgentSessionRecovery.shared.dismiss(surfaceID: id)
+            })
+            section.submenu = submenu
+            menu.addItem(section)
+        }
+        if menu.numberOfItems > 0 { menu.addItem(.separator()) }
+
+        if let message = promptAttention(for: tab) {
+            let summary = NSMenuItem(title: "Keep alive: \(message)", action: nil, keyEquivalent: "")
+            summary.isEnabled = false
+            menu.addItem(summary)
+            menu.addItem(.separator())
+        }
+
         let hasOtherTabs = tabs.count > 1
         menu.addItem(menuItem("Close Tab", symbol: "xmark") { [weak self] in
             self?.close(tab)
@@ -399,14 +466,14 @@ final class TerminalTabSidebarModel: ObservableObject {
         return menu
     }
 
-    private func menuItem(
+    func menuItem(
         _ title: String,
         symbol: String? = nil,
         isEnabled: Bool = true,
         handler: @escaping () -> Void
     ) -> NSMenuItem {
         let action = MenuAction(handler)
-        let item = NSMenuItem(title: title, action: #selector(MenuAction.perform(_:)), keyEquivalent: "")
+        let item = NSMenuItem(title: title, action: #selector(MenuAction.invokeSidebarMenuAction(_:)), keyEquivalent: "")
         item.target = action
         // The item's target is weak, so the item itself keeps the action alive.
         item.representedObject = action
@@ -425,7 +492,7 @@ final class TerminalTabSidebarModel: ObservableObject {
             self.handler = handler
         }
 
-        @objc func perform(_ sender: Any?) {
+        @objc func invokeSidebarMenuAction(_ sender: NSMenuItem) {
             handler()
         }
     }
@@ -753,6 +820,8 @@ private struct TerminalTabSidebarRow: View {
 
     @Environment(\.terminalTabSidebarPalette) private var palette
     @State private var isHovering = false
+    @ObservedObject private var recovery = AgentSessionRecovery.shared
+    @ObservedObject private var keepAlive = KeepAlive.shared
 
     var body: some View {
         content
@@ -763,12 +832,39 @@ private struct TerminalTabSidebarRow: View {
             .contentShape(Rectangle())
             .onTapGesture { model.select(tab) }
             .onHover { isHovering = $0 }
-            .help(isCompact ? tab.title : "")
-            .overlay(TerminalTabSidebarMenuArea { model.contextMenu(for: tab) })
+            .help([model.displayTitle(tab), attentionMessage].compactMap { $0 }.joined(separator: "\n"))
+            .overlay(TerminalTabSidebarMenuArea(dropTarget: { model.dropTarget(for: tab) }, menu: { model.contextMenu(for: tab) }))
             .accessibilityElement(children: .combine)
-            .accessibilityLabel(tab.title)
+            .accessibilityLabel(model.displayTitle(tab))
             .accessibilityAddTraits(tab.isSelected ? [.isButton, .isSelected] : .isButton)
             .accessibilityAction { model.select(tab) }
+    }
+
+    private var recoveryStatus: AgentSessionRecovery.Status? {
+        model.recoverySurfaces(for: tab).compactMap { recovery.status(for: $0.id) }
+            .first { $0.phase == .failed || $0.phase == .pending || $0.phase == .launching }
+    }
+
+    private var attentionMessage: String? {
+        recoveryStatus.map { $0.reason ?? "Waiting to resume this terminal" } ?? model.promptAttention(for: tab)
+    }
+
+    @ViewBuilder
+    private var statusBadge: some View {
+        if let status = recoveryStatus {
+            Image(systemName: status.phase == .failed ? "exclamationmark.triangle" : "clock")
+                .font(.system(size: 10))
+                .foregroundStyle(status.phase == .failed ? Color.red : Color.secondary)
+                .help(status.reason ?? "Waiting to resume this terminal")
+        } else if let message = model.promptAttention(for: tab) {
+            Image(systemName: "exclamationmark.circle.fill")
+                .font(.system(size: 10))
+                .foregroundStyle(.orange)
+                .help(message)
+                .accessibilityLabel("Keep alive needs attention: \(message)")
+        } else if tab.keepAlive != .off {
+            keepAliveBadge
+        }
     }
 
     /// Rows are flat: the selected tab gets a solid highlight, and a hovered one a lighter one.
@@ -800,9 +896,7 @@ private struct TerminalTabSidebarRow: View {
                 }
             }
             .overlay(alignment: .bottomTrailing) {
-                if tab.keepAlive != .off {
-                    keepAliveBadge.padding(2)
-                }
+                statusBadge.padding(2)
             }
     }
 
@@ -846,12 +940,16 @@ private struct TerminalTabSidebarRow: View {
             Text(tab.title)
                 .lineLimit(1)
                 .truncationMode(.tail)
+            if model.tabs.filter({ $0.title == tab.title }).count > 1, let id = tab.surfaceID {
+                Text(String(id.uuidString.prefix(6)).lowercased())
+                    .font(.system(size: 10, design: .monospaced))
+                    .foregroundStyle(.secondary)
+                    .fixedSize()
+            }
 
             Spacer(minLength: 4)
 
-            if tab.keepAlive != .off {
-                keepAliveBadge
-            }
+            statusBadge
 
             if let keyEquivalent = tab.keyEquivalent {
                 Text(keyEquivalent)
@@ -998,19 +1096,25 @@ private struct TerminalTabSidebarGroup: View {
 /// Shows an AppKit menu when its area is right-clicked or control-clicked, and lets every
 /// other mouse event through to the SwiftUI views beneath it.
 private struct TerminalTabSidebarMenuArea: NSViewRepresentable {
+    var dropTarget: (() -> Ghostty.SurfaceView?)?
     let menu: () -> NSMenu
 
     func makeNSView(context: Context) -> MenuAreaView {
         let view = MenuAreaView()
         view.menuProvider = menu
+        view.dropTargetProvider = dropTarget
         return view
     }
 
     func updateNSView(_ nsView: MenuAreaView, context: Context) {
         nsView.menuProvider = menu
+        nsView.dropTargetProvider = dropTarget
     }
 
-    final class MenuAreaView: NSView {
+    final class MenuAreaView: NSView, TerminalSidebarDropDestination {
+        var dropTargetProvider: (() -> Ghostty.SurfaceView?)?
+        var sidebarDropTarget: Ghostty.SurfaceView? { dropTargetProvider?() }
+        var representsSidebarTab: Bool { dropTargetProvider != nil }
         var menuProvider: (() -> NSMenu)?
 
         override func hitTest(_ point: NSPoint) -> NSView? {
@@ -1068,5 +1172,24 @@ extension EnvironmentValues {
     var terminalTabSidebarPalette: TerminalTabSidebarPalette {
         get { self[TerminalTabSidebarPaletteKey.self] }
         set { self[TerminalTabSidebarPaletteKey.self] = newValue }
+    }
+}
+
+/// A prompt problem remains visible only while this tab is authorized for keep alive.
+enum TerminalTabAttention {
+    static func promptMessage(_ statuses: [KeepAlivePromptStatus], authorized: Bool) -> String? {
+        guard authorized else { return nil }
+        let messages = statuses.filter { $0.phase == .attention }.map(\.message)
+        return messages.isEmpty ? nil : Array(Set(messages)).sorted().joined(separator: "\n")
+    }
+}
+
+/// Split order supplies a human location; the saved tool/session disambiguates identities.
+enum TerminalRecoveryPresentation {
+    static func label(ordinal: Int, binding: AgentSessionBinding?) -> String {
+        let terminal = "Terminal \(ordinal)"
+        guard let binding else { return "\(terminal) · No saved session" }
+        let tool = binding.tool == .codex ? "Codex" : "Claude"
+        return "\(terminal) · \(tool) …\(binding.sessionID.uuidString.suffix(6).lowercased())"
     }
 }

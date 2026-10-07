@@ -114,6 +114,12 @@ fn initThread(gpa: Allocator) !void {
 
     // Determine the Sentry cache directory.
     const cache_dir = cache_dir: {
+        // Explicit fork profiles must never share the compile-time daily bundle
+        // cache, even when CLI actions run before AppKit establishes identity.
+        if (try @import("../config/edit.zig").forkCachePath(alloc, "sentry")) |path| {
+            break :cache_dir path;
+        }
+
         // On macOS, we prefer to use the NSCachesDirectory value to be
         // a more idiomatic macOS application. But if XDG env vars are set
         // we will respect them.

@@ -64,6 +64,7 @@ final class ScriptMouseScrollCommand: NSScriptCommand {
             y: y,
             mods: .init(precision: precision, momentum: momentum)
         )
+        surfaceView.noteUserInput()
         surface.sendMouseScroll(scrollEvent)
 
         return nil

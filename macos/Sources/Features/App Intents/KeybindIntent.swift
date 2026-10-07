@@ -31,6 +31,7 @@ struct KeybindIntent: AppIntent {
             throw GhosttyIntentError.surfaceNotFound
         }
 
+        terminal.surfaceView?.noteUserInput()
         let performed = surface.perform(action: action)
         return .result(value: performed)
     }

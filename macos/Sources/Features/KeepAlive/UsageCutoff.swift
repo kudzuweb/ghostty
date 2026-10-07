@@ -79,7 +79,9 @@ enum UsageCutoff {
 
     /// Fractional minutes since local midnight.
     private static func minutesIntoDay(_ date: Date, calendar: Calendar) -> Double {
-        date.timeIntervalSince(calendar.startOfDay(for: date)) / 60
+        let components = calendar.dateComponents([.hour, .minute, .second], from: date)
+        return Double((components.hour ?? 0) * 60 + (components.minute ?? 0))
+            + Double(components.second ?? 0) / 60
     }
 
     // MARK: Reading transcripts
@@ -113,15 +115,14 @@ enum UsageCutoff {
 
     /// The assistant-message timestamps in one transcript's JSON lines.
     static func timestamps(inTranscript data: Data) -> [Date] {
-        let marker = Data(#""type":"assistant""#.utf8)
         var stamps: [Date] = []
         var lineStart = data.startIndex
         while lineStart < data.endIndex {
             let lineEnd = data[lineStart...].firstIndex(of: 0x0A) ?? data.endIndex
             let line = data[lineStart..<lineEnd]
             lineStart = lineEnd < data.endIndex ? data.index(after: lineEnd) : data.endIndex
-            guard line.range(of: marker) != nil,
-                  let object = try? JSONSerialization.jsonObject(with: line) as? [String: Any],
+            guard let object = try? JSONSerialization.jsonObject(with: line) as? [String: Any],
+                  object["type"] as? String == "assistant",
                   let text = object["timestamp"] as? String,
                   let date = parse(text)
             else { continue }
@@ -148,6 +149,22 @@ enum UsageCutoff {
         case winding
         /// At or past the cutoff: nothing is relaunched or nudged until the workday.
         case reached
+    }
+
+    /// Durable reached state survives missing transcript data and reset estimates moving.
+    struct Hold: Codable, Equatable {
+        var workday: Date?
+        var cutoff: Date?
+
+        mutating func resolve(computed: Date?, now: Date, workday nextWorkday: Date, warning: TimeInterval)
+            -> (cutoff: Date, phase: Phase)? {
+            if workday != nextWorkday { workday = nil; cutoff = nil }
+            if workday == nextWorkday, let cutoff { return (cutoff, .reached) }
+            let phase = UsageCutoff.phase(cutoff: computed, now: now, warning: warning)
+            guard phase != .clear, let computed else { return nil }
+            if phase == .reached { workday = nextWorkday; cutoff = computed }
+            return (computed, phase)
+        }
     }
 
     static func phase(cutoff: Date?, now: Date, warning: TimeInterval) -> Phase {
