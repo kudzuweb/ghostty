@@ -157,13 +157,14 @@ The check reports a new upstream minor or major release and never downloads or i
 
 ### Backports from upstream
 
-These came in so the foreground process id and tty could exist. Each is in upstream's development branch and will arrive in a later release, where a merge may show them as already applied.
+Each is in upstream's development branch and will arrive in a later release, where a merge may show them as already applied. The first three came in so the foreground process id and tty could exist; the last fixes non-ASCII text in `initial input`.
 
 | Backport | Detail |
 |---|---|
 | Foreground pid and tty name in the C API and core (`eb8b7dcd3`, `a67002713`) | The core surface can report the foreground process id and the pty name. Both return null when the platform cannot supply them. |
 | Process-info macro fixes (`9a3ffd27a`, `328bfe9a6`) | These fix C macro comparisons and simplify the macro use in `src/pty.zig`. |
 | Build fix (`80362ef21`) | `src/build/SharedDeps.zig` translates `pty.c` only for platforms that have PTYs, because the backported version also translated it for the iOS library and failed. Upstream later restored the same per-OS switch. |
+| UTF-8 in config string escapes (upstream `29b82dd80`, cherry-picked) | `src/config/string.zig` now reads a `\xNN` escape as one byte instead of a codepoint. Before, an AppleScript `initial input` (and the session resume and handoff launchers that use it) containing non-ASCII text reached the shell double-encoded, because `src/apprt/embedded.zig` escapes the string with `std.zig.stringEscape`, which writes each non-ASCII byte as `\xNN`, and the parser re-encoded each as a codepoint. It includes upstream's unit test. |
 
 ## Mauria's config and themes
 
