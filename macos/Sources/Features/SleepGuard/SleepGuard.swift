@@ -86,6 +86,12 @@ final class SleepGuard: NSObject, ObservableObject, NSMenuDelegate {
 
     @Published private(set) var mode: Mode = .manual
 
+    /// The mode in force: Auto while the overnight switch is on, otherwise the configured
+    /// `sleep-guard-mode`, which the switch never rewrites.
+    private var effectiveMode: Mode {
+        KeepAlive.shared.overnightActive ? .auto : mode
+    }
+
     private var statusItem: NSStatusItem?
     private var timer: Timer?
     private var busy = false
@@ -146,11 +152,29 @@ final class SleepGuard: NSObject, ObservableObject, NSMenuDelegate {
         if timer != nil { tick() }
     }
 
+    /// Called when the overnight switch turns on or off, which changes the effective mode.
+    func overnightDidChange() {
+        NSLog("SleepGuard: effective mode is now %@ (configured mode %@)", effectiveMode.rawValue, mode.rawValue)
+        // Going back to Manual must not leave behind the block the overnight Auto set.
+        let releaseBlock = autoBlocked && effectiveMode == .manual
+        if releaseBlock {
+            Task {
+                let error = await Task.detached { LidSleep.setBlocked(false, allowPrompt: false) }.value
+                if let error { NSLog("SleepGuard: couldn't release the overnight block: %@", error) }
+                blocked = await Task.detached { LidSleep.isBlocked() }.value
+            }
+        }
+        autoBlocked = false
+        retryAfter = .distantPast
+        lastBusy = Date()
+        if timer != nil { tick() }
+    }
+
     /// Called as Ghostty quits. A block Auto set shouldn't outlive the app, or a forgotten
     /// one drains a laptop in a bag. Runs synchronously because the process is exiting.
     func willTerminate() {
         timer?.invalidate()
-        guard mode == .auto, autoBlocked, LidSleep.isBlocked() == true else { return }
+        guard effectiveMode == .auto, autoBlocked, LidSleep.isBlocked() == true else { return }
         _ = LidSleep.setBlocked(false, allowPrompt: false)
     }
 
@@ -167,7 +191,7 @@ final class SleepGuard: NSObject, ObservableObject, NSMenuDelegate {
             var current = await Task.detached { LidSleep.isBlocked() }.value
             blocked = current
 
-            if mode == .auto, let read = current, Date() >= retryAfter {
+            if effectiveMode == .auto, let read = current, Date() >= retryAfter {
                 let desired = desiredBlocked(current: read)
                 // Only call pmset when the wanted state differs from the read state.
                 if desired != read {
@@ -347,8 +371,10 @@ final class SleepGuard: NSObject, ObservableObject, NSMenuDelegate {
         menu.addItem(state)
         menu.addItem(.separator())
 
-        if mode == .auto {
-            let managed = NSMenuItem(title: "Auto mode is managing this", action: nil, keyEquivalent: "")
+        if effectiveMode == .auto {
+            let title = KeepAlive.shared.overnightActive
+                ? "Overnight run: Auto mode is managing this" : "Auto mode is managing this"
+            let managed = NSMenuItem(title: title, action: nil, keyEquivalent: "")
             managed.isEnabled = false
             menu.addItem(managed)
         } else if let blocked {

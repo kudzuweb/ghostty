@@ -6,7 +6,12 @@ import GhosttyKit
 enum ConfigFile {
     /// The file Ghostty opens for "Open Configuration". Ghostty creates it, and its
     /// directory, when it is missing. Nil if Ghostty can't produce a path.
+    /// `GHOSTTY_FORK_CONFIG_FILE` replaces it.
     static var path: String? {
+        // A test points this at a scratch file so it never writes the live config.
+        if let override = ProcessInfo.processInfo.environment["GHOSTTY_FORK_CONFIG_FILE"], !override.isEmpty {
+            return override
+        }
         let path = Ghostty.AllocatedString(ghostty_config_open_path()).string
         return path.isEmpty ? nil : path
     }

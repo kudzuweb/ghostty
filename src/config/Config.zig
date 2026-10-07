@@ -3854,6 +3854,78 @@ term: []const u8 = "xterm-ghostty",
 /// Changing this configuration at runtime takes effect on reload.
 @"keep-alive-events-file": ?[:0]const u8 = null,
 
+/// Whether the usage cutoff winds down agent work so the workday starts in a
+/// usage window that is mostly unused. It applies to tabs that have keep alive
+/// on, and to every tab running an agent while `overnight-run` is on. The
+/// cutoff time is estimated from the five-hour usage windows visible in the
+/// timestamps of Claude Code transcripts modified in the last 36 hours.
+/// `usage-cutoff-warning` before the cutoff Ghostty types a wrap-up prompt
+/// into each idle Claude Code session once; after the cutoff keep alive stops
+/// relaunching and nudging those tabs until the workday starts.
+///
+/// Changing this configuration at runtime takes effect on reload.
+@"usage-cutoff": bool = false,
+
+/// The time of day the workday starts, as `HH:MM` on a 24-hour clock in the
+/// local time zone, for example `10:00` or `8:30`. The usage cutoff aims to
+/// have the workday start in a usage window that is at most about half used,
+/// and the overnight switch turns itself off at this time.
+///
+/// Changing this configuration at runtime takes effect on reload.
+@"usage-cutoff-workday-start": TimeOfDay = .{ .minutes = 10 * 60 },
+
+/// How much of the usage window the workday starts in may already be used,
+/// as a time stand-in for "at most half used", since nothing exposes the
+/// window's real usage.
+///
+/// The value uses the same duration format as `undo-timeout`.
+///
+/// Changing this configuration at runtime takes effect on reload.
+@"usage-cutoff-usable": Duration = .{ .duration = 2 * std.time.ns_per_hour },
+
+/// How long after the workday starts the usage window it starts in may reset.
+/// A window that resets later than this is treated as not worth waiting for.
+///
+/// The value uses the same duration format as `undo-timeout`.
+///
+/// Changing this configuration at runtime takes effect on reload.
+@"usage-cutoff-latest-reset": Duration = .{ .duration = 2 * std.time.ns_per_hour },
+
+/// How long before a window boundary or the workday start work must stop, so
+/// the cutoff leaves some slack.
+///
+/// The value uses the same duration format as `undo-timeout`.
+///
+/// Changing this configuration at runtime takes effect on reload.
+@"usage-cutoff-margin": Duration = .{ .duration = 15 * std.time.ns_per_min },
+
+/// How long before the cutoff Ghostty types the wrap-up prompt into idle
+/// Claude Code sessions.
+///
+/// The value uses the same duration format as `undo-timeout`.
+///
+/// Changing this configuration at runtime takes effect on reload.
+@"usage-cutoff-warning": Duration = .{ .duration = 25 * std.time.ns_per_min },
+
+/// Whether Ghostty sends SIGTERM to the Claude Code or Codex process in each
+/// tab the usage cutoff applies to when the cutoff is reached, as the
+/// retired watchdog did. When `false`, sessions are left running and only
+/// relaunching and nudging stop.
+///
+/// Changing this configuration at runtime takes effect on reload.
+@"usage-cutoff-stop-sessions": bool = false,
+
+/// Whether the overnight switch is on. While it is on, every tab running
+/// Claude Code or Codex is kept alive (without changing the tab's own keep
+/// alive setting), the usage cutoff applies, the sleep guard behaves as in
+/// `auto` mode (without changing `sleep-guard-mode`), and keep alive shows no
+/// notifications. Events are still written to the events file. At
+/// `usage-cutoff-workday-start` Ghostty writes `overnight-run = false` to the
+/// config file and reloads.
+///
+/// Changing this configuration at runtime takes effect on reload.
+@"overnight-run": bool = false,
+
 /// This is set by the CLI parser for deinit.
 _arena: ?ArenaAllocator = null,
 
@@ -9012,6 +9084,60 @@ pub const MacWindowButtons = enum {
 pub const SleepGuardMode = enum {
     manual,
     auto,
+};
+
+/// A time of day written `H:MM` or `HH:MM` on a 24-hour clock, for
+/// `usage-cutoff-workday-start` (Mauria's fork).
+pub const TimeOfDay = struct {
+    /// Minutes after midnight, 0 through 1439.
+    minutes: u16 = 0,
+
+    pub fn clone(self: *const TimeOfDay, _: Allocator) error{}!TimeOfDay {
+        return self.*;
+    }
+
+    pub fn equal(self: TimeOfDay, other: TimeOfDay) bool {
+        return self.minutes == other.minutes;
+    }
+
+    pub fn parseCLI(input: ?[]const u8) !TimeOfDay {
+        const raw = std.mem.trim(u8, input orelse return error.ValueRequired, &std.ascii.whitespace);
+        if (raw.len == 0) return error.ValueRequired;
+        const colon = std.mem.indexOfScalar(u8, raw, ':') orelse return error.InvalidValue;
+        const hour_text = raw[0..colon];
+        const minute_text = raw[colon + 1 ..];
+        if (hour_text.len < 1 or hour_text.len > 2 or minute_text.len != 2) return error.InvalidValue;
+        const hour = std.fmt.parseUnsigned(u16, hour_text, 10) catch return error.InvalidValue;
+        const minute = std.fmt.parseUnsigned(u16, minute_text, 10) catch return error.InvalidValue;
+        if (hour > 23 or minute > 59) return error.InvalidValue;
+        return .{ .minutes = hour * 60 + minute };
+    }
+
+    pub fn formatEntry(self: TimeOfDay, formatter: formatterpkg.EntryFormatter) !void {
+        var buf: [8]u8 = undefined;
+        const text = std.fmt.bufPrint(&buf, "{d:0>2}:{d:0>2}", .{ self.minutes / 60, self.minutes % 60 }) catch unreachable;
+        try formatter.formatEntry([]const u8, text);
+    }
+
+    /// Minutes after midnight, for the C API.
+    pub fn cval(self: TimeOfDay) u16 {
+        return self.minutes;
+    }
+
+    test "parseCLI" {
+        const testing = std.testing;
+        try testing.expectEqual(@as(u16, 600), (try TimeOfDay.parseCLI("10:00")).minutes);
+        try testing.expectEqual(@as(u16, 510), (try TimeOfDay.parseCLI("8:30")).minutes);
+        try testing.expectEqual(@as(u16, 1439), (try TimeOfDay.parseCLI(" 23:59 ")).minutes);
+        try testing.expectEqual(@as(u16, 0), (try TimeOfDay.parseCLI("00:00")).minutes);
+        try testing.expectError(error.InvalidValue, TimeOfDay.parseCLI("24:00"));
+        try testing.expectError(error.InvalidValue, TimeOfDay.parseCLI("10:60"));
+        try testing.expectError(error.InvalidValue, TimeOfDay.parseCLI("10"));
+        try testing.expectError(error.InvalidValue, TimeOfDay.parseCLI("10:5"));
+        try testing.expectError(error.InvalidValue, TimeOfDay.parseCLI("ten:00"));
+        try testing.expectError(error.InvalidValue, TimeOfDay.parseCLI("-1:00"));
+        try testing.expectError(error.ValueRequired, TimeOfDay.parseCLI(null));
+    }
 };
 
 /// The values of `keep-alive-background` (Mauria's fork).
