@@ -55,7 +55,8 @@ enum AgentSessionResume {
                 let modified = (try? recordURL.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate
                 if let modified, modified.timeIntervalSince1970 >= Double(before.identity.startSeconds) + Double(before.identity.startMicroseconds) / 1_000_000 {
                     bindings.append(.init(tool: .claude, sessionID: id, sessionRoot: claudeRoot,
-                                          launchCWD: json["cwd"] as? String ?? cwd))
+                                          launchCWD: json["cwd"] as? String ?? cwd,
+                                          configurationRootWasExplicit: environment["CLAUDE_CONFIG_DIR"] != nil))
                 }
             }
             for path in paths where (path as NSString).lastPathComponent.hasPrefix("rollout-") && path.hasSuffix(".jsonl") {

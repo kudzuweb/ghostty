@@ -7,12 +7,38 @@ struct AgentSessionBinding: Codable, Equatable {
     let sessionRoot: String
     let launchCWD: String?
 
+    /// Nil preserves compatibility with archives that saved only the effective root.
+    /// False means the original Claude process used its ordinary environment.
+    let configurationRootWasExplicit: Bool?
+
+    init(tool: AgentTool, sessionID: UUID, sessionRoot: String, launchCWD: String?,
+         configurationRootWasExplicit: Bool? = nil) {
+        self.tool = tool
+        self.sessionID = sessionID
+        self.sessionRoot = sessionRoot
+        self.launchCWD = launchCWD
+        self.configurationRootWasExplicit = configurationRootWasExplicit
+    }
+
     var key: String { "\(tool.rawValue):\(sessionRoot):\(sessionID.uuidString.lowercased())" }
 
     var command: String {
+        command(homeDirectory: FileManager.default.homeDirectoryForCurrentUser.path)
+    }
+
+    func command(homeDirectory: String) -> String {
         let rootKey = tool == .codex ? "CODEX_HOME" : "CLAUDE_CONFIG_DIR"
         let resume = tool.resumeCommand(sessionID: sessionID.uuidString.lowercased())
-        let launch = "env \(rootKey)=\(Self.quote(sessionRoot)) \(resume)"
+        let defaultClaudeRoot = URL(fileURLWithPath: homeDirectory).appendingPathComponent(".claude")
+            .standardizedFileURL.resolvingSymlinksInPath().path
+        let savedRoot = URL(fileURLWithPath: sessionRoot).standardizedFileURL.resolvingSymlinksInPath().path
+        let implicitClaudeRoot = tool == .claude && (configurationRootWasExplicit == false
+            || (configurationRootWasExplicit == nil && savedRoot == defaultClaudeRoot))
+        // An explicit ~/.claude is not equivalent to an unset CLAUDE_CONFIG_DIR:
+        // Claude can select different trust/configuration state before registration.
+        let launch = implicitClaudeRoot
+            ? "env -u CLAUDE_CONFIG_DIR \(resume)"
+            : "env \(rootKey)=\(Self.quote(sessionRoot)) \(resume)"
         return launchCWD.map { "cd -- \(Self.quote($0)) && \(launch)" } ?? launch
     }
 

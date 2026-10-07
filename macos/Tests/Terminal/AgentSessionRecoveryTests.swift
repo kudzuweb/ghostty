@@ -12,6 +12,45 @@ struct AgentSessionRecoveryTests {
         #expect(AgentSessionBinding.legacy("echo anything", cwd: nil, home: "/home/a") == nil)
     }
 
+    @Test func inferredClaudeDefaultRestoresOrdinaryConfiguration() {
+        let binding = AgentSessionBinding(tool: .claude, sessionID: id, sessionRoot: "/home/test/.claude",
+                                          launchCWD: "/work/space 'quote", configurationRootWasExplicit: false)
+        #expect(binding.command(homeDirectory: "/home/test")
+            == "cd -- '/work/space '\\''quote' && env -u CLAUDE_CONFIG_DIR claude --resume \(id.uuidString.lowercased())")
+    }
+
+    @Test func intentionalClaudeRootsRemainExplicit() {
+        for root in ["/home/test/.claude", "/custom/space 'quote"] {
+            let binding = AgentSessionBinding(tool: .claude, sessionID: id, sessionRoot: root,
+                                              launchCWD: nil, configurationRootWasExplicit: true)
+            #expect(binding.command(homeDirectory: "/home/test")
+                == "env CLAUDE_CONFIG_DIR=\(AgentSessionBinding.quote(root)) claude --resume \(id.uuidString.lowercased())")
+        }
+    }
+
+    @Test func priorBindingsDecodeWithoutInventingExplicitDefaultRoot() throws {
+        for root in ["/home/test/.claude", "/custom/space 'quote"] {
+            let data = try JSONSerialization.data(withJSONObject: ["tool": "claude", "sessionID": id.uuidString,
+                                                                  "sessionRoot": root, "launchCWD": "/work"])
+            let binding = try JSONDecoder().decode(AgentSessionBinding.self, from: data)
+            #expect(binding.configurationRootWasExplicit == nil)
+            let launch = root == "/home/test/.claude" ? "env -u CLAUDE_CONFIG_DIR"
+                : "env CLAUDE_CONFIG_DIR=\(AgentSessionBinding.quote(root))"
+            #expect(binding.command(homeDirectory: "/home/test")
+                == "cd -- '/work' && \(launch) claude --resume \(id.uuidString.lowercased())")
+        }
+    }
+
+    @Test func explicitRootIntentRoundTripsAndCodexKeepsItsRoot() throws {
+        let explicit = AgentSessionBinding(tool: .claude, sessionID: id, sessionRoot: "/home/test/.claude",
+                                           launchCWD: nil, configurationRootWasExplicit: true)
+        let decoded = try JSONDecoder().decode(AgentSessionBinding.self, from: JSONEncoder().encode(explicit))
+        #expect(decoded == explicit)
+        let codex = AgentSessionBinding(tool: .codex, sessionID: id, sessionRoot: "/home/test/.codex", launchCWD: nil)
+        #expect(codex.command(homeDirectory: "/home/test")
+            == "env CODEX_HOME='/home/test/.codex' codex resume \(id.uuidString.lowercased())")
+    }
+
     @Test func pendingAndFailedSurviveSecondRestart() throws {
         let binding = AgentSessionBinding(tool: .codex, sessionID: id, sessionRoot: "/custom/Unicode — root", launchCWD: "/tmp")
         for phase in [AgentSessionRecoveryRecord.Phase.pending, .launching, .failed] {
