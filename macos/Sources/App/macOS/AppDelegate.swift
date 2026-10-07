@@ -221,6 +221,8 @@ class AppDelegate: NSObject,
         // Start our update checker.
         updateController.startUpdater()
 
+        SleepGuard.shared.start()
+
         // Register our service provider. This must happen after everything is initialized.
         NSApp.servicesProvider = ServiceProvider()
 
@@ -433,6 +435,8 @@ class AppDelegate: NSObject,
     }
 
     func applicationWillTerminate(_ notification: Notification) {
+        SleepGuard.shared.willTerminate()
+
         // We have no notifications we want to persist after death,
         // so remove them all now. In the future we may want to be
         // more selective and only remove surface-targeted notifications.
