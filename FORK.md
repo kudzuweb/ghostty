@@ -138,7 +138,7 @@ The live config is `~/Library/Application Support/com.mitchellh.ghostty/config.g
 | Line | What it does and why |
 |---|---|
 | `macos-titlebar-style = vertical-tabs` | Turns on the vertical tab sidebar. |
-| `theme = Nu Disco` | Selects the custom theme below. A `background`, `foreground` or `palette` line in the config would override any theme, so the config has none. |
+| `theme = Nu-er Disco` | Selects the custom theme below. A `background`, `foreground` or `palette` line in the config would override any theme, so the config has none. |
 | `working-directory = ~/Documents/Projects` | The first window opens in the projects folder. It applies to the first window only, and new tabs inherit the current tab's folder. |
 | `window-save-state = always` | Restores windows after a normal quit, which session resume depends on. |
 
@@ -148,6 +148,7 @@ Custom themes live in `~/.config/ghostty/themes/`, and copies are in `fork/theme
 |---|---|
 | `Black` | Black background with white text, matching Mauria's Warp setup. |
 | `Nu Disco` | Adapted from the MIT-licensed VS Code theme by dbanksdesign (`dbanksdesign/nu-disco-vscode-theme`). Translucent colors are flattened onto the background because Ghostty palettes have no alpha, and the normal and bright ANSI sets are swapped so terminal output matches the editor's look. |
+| `Nu-er Disco` | Mauria's active theme since 2026-10-07: a warmer, darker, softer palette sampled from a neon-lit reference image. It has a plum background (`#190920`), and its accents are about 10% darker and 15% less saturated than the raw sampling, because she found saturated accents tiring ("my eyes don't settle"). The original `Nu Disco` is kept as an option. |
 | `Solarized Dark Higher Contrast` | This is a built-in theme, not a file in the fork, and it is Mauria's Solarized option. |
 
 ## Integrations elsewhere
