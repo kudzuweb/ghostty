@@ -99,6 +99,10 @@ final class SleepGuard: NSObject, ObservableObject, NSMenuDelegate {
     /// Whether the current block was set by Auto, so quitting can undo it.
     private var autoBlocked = false
 
+    /// How long Auto waits after a failed flip before trying again. The error window stays
+    /// up for the same time.
+    static let retryDelay: TimeInterval = 30
+
     /// After Auto fails to flip (no sudo rule), wait before trying again rather than
     /// failing every tick.
     private var retryAfter = Date.distantPast
@@ -163,10 +167,14 @@ final class SleepGuard: NSObject, ObservableObject, NSMenuDelegate {
                     let error = await Task.detached {
                         LidSleep.setBlocked(desired, allowPrompt: false)
                     }.value
-                    if error == nil {
-                        autoBlocked = desired
+                    if let error {
+                        retryAfter = Date().addingTimeInterval(Self.retryDelay)
+                        SleepGuardErrorPanel.shared.show(
+                            message: "Auto mode couldn't change lid sleep.\n\(error)\n\n"
+                                + "Retrying in \(Int(Self.retryDelay)) seconds.",
+                            closeAfter: Self.retryDelay)
                     } else {
-                        retryAfter = Date().addingTimeInterval(60)
+                        autoBlocked = desired
                     }
                     current = await Task.detached { LidSleep.isBlocked() }.value
                     blocked = current
@@ -197,14 +205,52 @@ final class SleepGuard: NSObject, ObservableObject, NSMenuDelegate {
     /// so a terminal without integration reads as busy forever. The cost of this signal is
     /// that work done inside the shell itself (a builtin loop, a background job) reads as
     /// idle, and a nested shell or an interactive REPL reads as running only if it isn't
-    /// itself a shell.
+    /// itself a shell. The one exception is a background `claude` or `codex` anywhere on
+    /// the terminal's TTY, which counts (see `agentRunning`).
     private static func anyProgramRunning() -> Bool {
+        var devices = Set<dev_t>()
         let controllers = NSApp.windows.compactMap { $0.windowController as? BaseTerminalController }
         for controller in controllers {
             for view in controller.surfaceTree.root?.leaves() ?? [] {
-                guard let pid = view.surfaceModel?.foregroundPID,
-                      let name = executableName(of: pid) else { continue }
-                if !idleShells.contains(name) { return true }
+                if let pid = view.surfaceModel?.foregroundPID,
+                   let name = executableName(of: pid),
+                   !idleShells.contains(name) { return true }
+                if let tty = view.surfaceModel?.ttyName {
+                    var info = stat()
+                    if stat(tty, &info) == 0 { devices.insert(info.st_rdev) }
+                }
+            }
+        }
+        return !devices.isEmpty && agentRunning(onDevices: devices)
+    }
+
+    /// Executable names of coding agents. One of these running on a terminal's TTY counts
+    /// as a running program even in the background; other background jobs do not.
+    private static let agentNames: Set<String> = ["claude", "codex"]
+
+    /// Whether any process attached to one of the given TTY devices is a coding agent.
+    /// Lists all processes with one `sysctl(KERN_PROC_ALL)` call and matches `e_tdev`, so
+    /// nothing is spawned. The name is checked against the kernel's process name and then
+    /// the executable path, which covers a binary reached through a symlink.
+    private static func agentRunning(onDevices devices: Set<dev_t>) -> Bool {
+        var mib: [Int32] = [CTL_KERN, KERN_PROC, KERN_PROC_ALL]
+        var size = 0
+        guard sysctl(&mib, 3, nil, &size, nil, 0) == 0, size > 0 else { return false }
+        // Leave slack for processes that start between the two calls.
+        var procs = [kinfo_proc](repeating: kinfo_proc(), count: size / MemoryLayout<kinfo_proc>.stride + 16)
+        size = procs.count * MemoryLayout<kinfo_proc>.stride
+        guard sysctl(&mib, 3, &procs, &size, nil, 0) == 0 else { return false }
+        let count = size / MemoryLayout<kinfo_proc>.stride
+
+        for index in 0..<count {
+            var proc = procs[index]
+            guard devices.contains(proc.kp_eproc.e_tdev) else { continue }
+            let comm = withUnsafePointer(to: &proc.kp_proc.p_comm) {
+                $0.withMemoryRebound(to: CChar.self, capacity: Int(MAXCOMLEN) + 1) { String(cString: $0) }
+            }
+            if agentNames.contains(comm) { return true }
+            if let name = executableName(of: Int(proc.kp_proc.p_pid)), agentNames.contains(name) {
+                return true
             }
         }
         return false
@@ -341,12 +387,62 @@ final class SleepGuard: NSObject, ObservableObject, NSMenuDelegate {
             blocked = await Task.detached { LidSleep.isBlocked() }.value
             busy = false
             if let error {
-                let alert = NSAlert()
-                alert.messageText = "Sleep Guard"
-                alert.informativeText = error
-                alert.alertStyle = .warning
-                alert.runModal()
+                SleepGuardErrorPanel.shared.show(message: error, closeAfter: nil)
             }
         }
+    }
+}
+
+/// A small non-modal window that reports a failed flip. One instance is reused, so repeated
+/// failures replace the text instead of stacking windows.
+@MainActor
+final class SleepGuardErrorPanel {
+    static let shared = SleepGuardErrorPanel()
+
+    private var panel: NSPanel?
+    private var label: NSTextField?
+    private var closeTimer: Timer?
+
+    /// Shows the message. With `closeAfter`, the window closes itself after that many
+    /// seconds unless the user closed it first.
+    func show(message: String, closeAfter: TimeInterval?) {
+        NSLog("SleepGuard error: %@", message.replacingOccurrences(of: "\n", with: " | "))
+        let panel = self.panel ?? makePanel()
+        label?.stringValue = message
+        closeTimer?.invalidate()
+        closeTimer = nil
+        if let closeAfter {
+            closeTimer = Timer.scheduledTimer(withTimeInterval: closeAfter, repeats: false) { [weak self] _ in
+                MainActor.assumeIsolated { self?.panel?.close() }
+            }
+        }
+        panel.orderFrontRegardless()
+    }
+
+    private func makePanel() -> NSPanel {
+        let panel = NSPanel(
+            contentRect: NSRect(x: 0, y: 0, width: 420, height: 130),
+            styleMask: [.titled, .closable, .utilityWindow],
+            backing: .buffered, defer: false)
+        panel.title = "Sleep Guard"
+        panel.level = .floating
+        panel.isReleasedWhenClosed = false
+        panel.hidesOnDeactivate = false
+
+        let label = NSTextField(wrappingLabelWithString: "")
+        label.translatesAutoresizingMaskIntoConstraints = false
+        panel.contentView?.addSubview(label)
+        if let content = panel.contentView {
+            NSLayoutConstraint.activate([
+                label.topAnchor.constraint(equalTo: content.topAnchor, constant: 16),
+                label.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 16),
+                label.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -16),
+                label.bottomAnchor.constraint(lessThanOrEqualTo: content.bottomAnchor, constant: -16),
+            ])
+        }
+        panel.center()
+        self.panel = panel
+        self.label = label
+        return panel
     }
 }
