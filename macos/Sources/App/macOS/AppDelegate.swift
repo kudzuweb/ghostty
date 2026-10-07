@@ -222,6 +222,7 @@ class AppDelegate: NSObject,
         updateController.startUpdater()
 
         SleepGuard.shared.start()
+        KeepAlive.shared.start()
 
         // Register our service provider. This must happen after everything is initialized.
         NSApp.servicesProvider = ServiceProvider()
@@ -436,6 +437,7 @@ class AppDelegate: NSObject,
 
     func applicationWillTerminate(_ notification: Notification) {
         SleepGuard.shared.willTerminate()
+        KeepAlive.shared.willTerminate()
 
         // We have no notifications we want to persist after death,
         // so remove them all now. In the future we may want to be
@@ -758,7 +760,10 @@ class AppDelegate: NSObject,
     }
 
     private func ghosttyConfigDidChange(config: Ghostty.Config) {
-        MainActor.assumeIsolated { SleepGuard.shared.apply(config) }
+        MainActor.assumeIsolated {
+            SleepGuard.shared.apply(config)
+            KeepAlive.shared.apply(config)
+        }
 
         // Update the config we need to store
         self.derivedConfig = DerivedConfig(config)

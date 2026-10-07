@@ -116,6 +116,19 @@ final class ScriptTab: NSObject {
         }
     }
 
+    /// Exposed as the AppleScript `keep alive` property: whether keep alive watches this tab.
+    @objc(keepAlive)
+    var keepAlive: Bool {
+        get {
+            guard NSApp.isAppleScriptEnabled else { return false }
+            return (controller?.window as? TerminalWindow)?.keepAlive ?? false
+        }
+        set {
+            guard NSApp.isAppleScriptEnabled else { return }
+            (controller?.window as? TerminalWindow)?.keepAlive = newValue
+        }
+    }
+
     /// Exposed as the AppleScript `focused terminal` property.
     ///
     /// Uses the currently focused surface for this tab.

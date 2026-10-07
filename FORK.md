@@ -29,6 +29,7 @@ Each row is a commit on `main` after `v1.3.1`, listed with its hash. Find the fu
 |---|---|
 | The `tab color` property on a tab (`7452aee75`) | Read or set it with one of ten values: `no color`, `blue`, `purple`, `pink`, `red`, `orange`, `yellow`, `green`, `teal` or `graphite`. It is the same setter the tab's context menu uses, so the color redraws and persists with window state. |
 | The `group name` and `group color` properties on a tab (`447a1e979`) | `group name` reads or sets the tab's sidebar group, and `group color` reads or sets the color shared by every tab in that group. `group color` is ignored for a tab that is in no group. |
+| The `keep alive` property on a tab (see "Keep alive") | Read or set it with `true` or `false`. It is the same switch the tab's context menu uses, and it persists with window state. |
 | The `pid` and `tty` properties on a terminal (`452171c48`) | Both are read-only: `pid` is the foreground process id and `tty` is the terminal's device path. They also appear on the App Intents terminal entity. |
 
 ### Vertical tab sidebar and tab groups
@@ -76,9 +77,49 @@ The change is in `src/config/Config.zig` (the keys), `macos/Sources/Features/Set
 | Config keys | `sleep-guard-mode` is an enum, `manual` or `auto`, default `manual`. `sleep-guard-grace` is a Ghostty duration such as `120s` or `2m` (a bare number is rejected), default `120s`. Both sit in one block in `Config.zig` marked as the fork's, just before the `_arena` field. Swift reads them through `ghostty_config_get`, in `Ghostty.Config.sleepGuardMode` and `sleepGuardGrace`. |
 | Sleep guard reads the config | `SleepGuard.apply(_:)` takes both values at launch and on every config reload, from `AppDelegate.ghosttyConfigDidChange(config:)`. The old `UserDefaults` keys `SleepGuardMode` and `SleepGuardGraceSeconds` are gone and any value stored in them is ignored. |
 | Config file editor | `ConfigFileEditor` (text only) and `ConfigFile` (file and reload). The file is the path `ghostty_config_open_path()` returns, which Ghostty creates when missing. Setting a key rewrites the last active `key = ...` line (the last occurrence wins in Ghostty, so rewriting an earlier line would have no effect), or appends it, and every other line is kept byte for byte. Fork keys are appended under a `# Mauria's fork settings` comment created once. The write is atomic through the resolved symlink target, then `reloadConfig()` runs. |
-| Panel | A gear button in the sidebar header, in the expanded and collapsed sidebar, opens the Settings window (`ForkSettingsPanelController`). Appearance has a searchable theme list of the custom themes in `~/.config/ghostty/themes/` (or `$XDG_CONFIG_HOME`) and the themes bundled in the app, marks the current `theme` line, and writes `theme = <name>` when one is chosen. It also shows `macos-titlebar-style` read-only. Sleep guard has the mode picker and the grace period in seconds (applied on Return). The footer has "Open config file" and "Fork notes". |
+| Panel | A gear button in the sidebar header, in the expanded and collapsed sidebar, opens the Settings window (`ForkSettingsPanelController`). Appearance has a searchable theme list of the custom themes in `~/.config/ghostty/themes/` (or `$XDG_CONFIG_HOME`) and the themes bundled in the app, marks the current `theme` line, and writes `theme = <name>` when one is chosen. It also shows `macos-titlebar-style` read-only. Sleep guard has the mode picker and the grace period in seconds (applied on Return). Keep alive has the six `keep-alive-*` keys. The footer has "Open config file" and "Fork notes". |
 | Adding a section | Write a view that wraps its controls in `ForkSettingsSection` and list it in `ForkSettingsView` in `ForkSettingsPanel.swift`. |
 | Limits | The current theme is read from the config file, because `theme` is not exposed through `ghostty_config_get`. A value set on the command line overrides the file after a reload. A `light:...,dark:...` theme value is shown as "not in the list". |
+
+### Keep alive
+
+Keep alive replaces the watchdog daemon at `scripts/watchdog` in `claudemonorepo`, which is still there until it is retired (see "Planned work"). The code is in `macos/Sources/Features/KeepAlive/`: `KeepAliveLogic.swift` holds the decisions as pure functions, `KeepAlive.swift` the timer and the actions, and `KeepAliveRelaunchJob.swift` the launchd job. This is phase 3a; the Claude Code Mod that turns events into prompts is phase 3b.
+
+| Part | Detail |
+|---|---|
+| The toggle | Right-click a tab in the sidebar and choose "Keep alive" (a checkmark shows when it is on). The state is saved with window state, like the tab group, and a tab restored with it on is watched again. The sidebar row shows a refresh icon while the tab is watched and a red warning triangle once keep alive has given up on it. A gave-up tab's menu item reads "Keep alive: gave up, try again", which clears the crash count. The gave-up mark is not saved. |
+| The timer | One timer ticks every 30 seconds (`KeepAlive.tickInterval`) over the tabs with keep alive on, every terminal in a split tab included. A session that starts and dies inside one tick is never seen, so it is never relaunched. |
+| What is remembered | Each tick, the Claude Code or Codex session in a terminal's foreground is found with `AgentSessionResume.session(forProcess:)` and remembered, so it is still known after its process dies. |
+| Crash relaunch | When the remembered session's process is gone, the terminal's foreground is an idle shell again, and the shell reported a crash-like exit status, keep alive types `claude --resume <id>` or `codex resume <id>` into the terminal and presses Enter. The text goes through the surface's text input and Enter is a separate key press 300 ms later, because Claude Code reads a burst of text ending in a newline as a paste. |
+| Deliberate exit versus crash | The signal is the exit status of the command that just finished, which Ghostty's shell integration reports (the `command_finished` action). Status 0 (`/exit`, Ctrl-D) and 130 (Ctrl-C) count as deliberate; any other status, such as 137 for `kill -9`, is a crash. When no status arrives, as when shell integration is off, the session is not relaunched and a line is logged. This applies to Codex too, and it is untested whether Codex exits with 0 on a deliberate quit. Claude Code leaves no usable mark in its transcript: no transcript on this machine contains `/exit`, and the only difference seen was one run each, where the tail ended with `cost-state` after `/exit` and with `bridge-session` after `kill -9`. Neither is used. |
+| Crash limit | At most `keep-alive-max-crashes` relaunches in any 60 minutes per terminal. The next crash marks the tab "gave up", writes a `gave_up` event and shows a notification, and nothing more is typed until the mark is cleared. |
+| API errors | Claude Code only; Codex sessions are not checked for API errors. When the session process is alive and `claude agents --json --all` reports its status as `idle`, and the last conversation entry of its transcript (`~/.claude/projects/*/<session id>.jsonl`, last 64 KB) has `"isApiErrorMessage": true`, the `error` field picks the policy in the next table. A `busy` or `waiting` session, or a failed `claude agents` call, is never typed into. `claude agents` runs once per tick. |
+| Background sessions | Each tick, entries of `claude agents --json --all` with `kind` `background` and `state` `failed` get `claude respawn <id>`, at most `keep-alive-max-crashes` times per hour per session, then a `gave_up` event and a notification. `stopped` and `done` are never respawned. This runs whether or not any tab has keep alive on, controlled by `keep-alive-background`. On 2026-10-07 this machine had only `done` and `blocked` background sessions, so the `failed` and `stopped` states come from Mauria's description and are checked only by a test on a synthetic list. |
+| Ghostty relaunch job | See the next table. |
+| Events file | One JSON line per event is appended to `keep-alive-events-file`, creating missing directories. Fields: `time` (ISO 8601, UTC), `event` (`relaunched`, `gave_up`, `nudged`, `error_notified` or `respawned`), `tool`, `session_id`, `tab_title`, and `error_type` and `message` when relevant. |
+| Notifications | Every keep alive notification goes through `KeepAlive.notifyKeepAlive(title:body:)`, which skips the notification while `KeepAlive.notificationsSuppressed()` returns true. That closure is the hook for the overnight switch in a later phase. Notifications are for `gave_up`, for errors that are not retried, and for a rate limit with no usable reset time. A debug build is not authorized for notifications by macOS, so the notification path was exercised only as far as the authorization refusal. |
+| Config keys | `keep-alive-max-crashes`, `keep-alive-server-error-interval`, `keep-alive-rate-limit-interval`, `keep-alive-background`, `keep-alive-relaunch-ghostty` and `keep-alive-events-file`, in the fork block of `Config.zig`, read through `Ghostty.Config` and re-read on reload. The Settings window has a Keep alive section for them. |
+
+What each API error does:
+
+| Error | What keep alive does |
+|---|---|
+| `rate_limit` with "session limit · resets 3:20am (America/Chicago)" | Types `continue` and Enter once, 60 seconds after the next occurrence of that time in that zone after the error's timestamp. If the same error is still the last entry after `keep-alive-rate-limit-interval`, it nudges again. |
+| `rate_limit` without a reset time ("out of usage credits"), or with one that can't be parsed | Notifies once, then nudges every `keep-alive-rate-limit-interval` (default 15 minutes), counted from the error's timestamp. |
+| `server_error` | Nudges every `keep-alive-server-error-interval` (default 5 minutes), counted from the error's timestamp. |
+| `authentication_failed`, `model_not_found` and every other type | Notifies once and never retries. |
+
+How the Ghostty relaunch job works, and where it differs from the plan:
+
+| Part | Detail |
+|---|---|
+| Plan and why it changed | The plan was a job running the Ghostty binary with `KeepAlive` `SuccessfulExit` false. `man launchd.plist` says that key implies `RunAtLoad`, so loading the job would start a second Ghostty at once, and launchd only restarts a process it started, which a Ghostty opened from the Dock is not. The launched-binary behavior itself was not tested. |
+| What is installed | `~/Library/LaunchAgents/com.mauria.ghostty-relaunch.plist`, loaded with `launchctl bootstrap gui/<uid>`. It runs a short shell watcher with the running Ghostty's pid, the app's path and a marker file path. The plist keeps `KeepAlive` `SuccessfulExit` false, so a failed `open` is retried and a normal exit is not, and `RunAtLoad` true, which that key needs. |
+| What the watcher does | It waits until the pid is gone. If the marker file `~/.local/state/ghostty/clean-quit.<label>` exists, Ghostty quit normally, so the watcher deletes it and exits 0. Otherwise it runs `open` on the app, which is a relaunch after a crash or a force quit. |
+| Lifecycle | Ghostty deletes the marker, boots out any loaded job and installs a fresh one at launch and on a reload that changes the key. It writes the marker as it quits. With the key `false` it boots the job out and deletes the plist. The job is also associated with Ghostty's bundle id, so Login Items shows it under Ghostty instead of "sh". |
+| Debug builds | A debug build uses the label `com.mauria.ghostty-relaunch.debug`, so testing it cannot replace or remove the job of the Ghostty in daily use. |
+| Checked on 2026-10-07 | With the debug build: install and removal with the key toggled, a normal quit (no relaunch) and `kill -9` (relaunched within seconds). |
+| Limits | A SIGTERM sent from outside can race the marker write and read as a crash. If a Mac shuts down while the marker is absent, Ghostty opens at the next login. |
 
 ### Backports from upstream
 
@@ -133,7 +174,7 @@ Both launchers address `/Applications/Ghostty.app` by absolute path.
 | File | Why it conflicts |
 |---|---|
 | `macos/Sources/Features/Terminal/TerminalTabSidebar.swift` | The sidebar came from an unmerged upstream pull request and was restyled and extended with groups, theme colors and the sleep guard button. This is the main hot spot. |
-| `src/config/Config.zig` | The fork's config keys live in one marked block before the `_arena` field, plus the `SleepGuardMode` enum next to `MacTitlebarStyle`. Keep both when merging. |
+| `src/config/Config.zig` | The fork's config keys live in one marked block before the `_arena` field, plus the `SleepGuardMode` and `KeepAliveBackground` enums next to `MacTitlebarStyle`. Keep all of them when merging. |
 | `include/ghostty.h` | Upstream renamed every C API declaration with a `GHOSTTY_API` prefix after 1.3, so backports touching it conflict. Keep the release's style and add the new declarations. |
 | `src/pty.zig`, `src/build/SharedDeps.zig` and `src/termio/` | These hold the backported process-info code and may already be applied upstream. |
 | `macos/Ghostty.sdef` | The fork adds properties here, and `macos/AGENTS.md` fixes the order of top-level definitions: classes, records, enums, commands. |
@@ -146,16 +187,16 @@ Both launchers address `/Applications/Ghostty.app` by absolute path.
 | An interrupted `zig build` leaves `macos/GhosttyKit.xcframework`, which breaks the next build with code 70. | Delete that folder and rebuild. |
 | The clone is a blob-less partial clone, and a stale commit graph broke history searches. | Delete `.git/objects/info/commit-graph*`. |
 | AppleScript `input text` pastes without running the line. | Follow it with `send key "enter"`, or use a surface configuration's `initial input`. |
+| A debug build started with `open`, or by the Ghostty relaunch job, asks macOS for access to the Documents folder and does not finish launching until the prompt is answered. | Start debug builds from a shell, as the launch script does. |
 | The live app and a debug build both have the process name `ghostty`. | Address a debug build by its absolute path in AppleScript, and never touch a process you did not start. |
 
 ## Planned work
 
-These are Mauria's decisions and none is built yet.
+These are Mauria's decisions and none of these rows is built yet. Keep alive is built; see "Keep alive".
 
 | Item | Decision |
 |---|---|
-| Keep alive | It replaces the watchdog daemon at `scripts/watchdog` in `claudemonorepo`, and each tab has a right-click toggle. A crashed session is relaunched with `--resume` in the same tab, at most 3 crashes in any 60 minutes, then the tab is marked "gave up". On a session-limit `rate_limit` error it nudges "continue" just after the reset time printed in the message, otherwise every 15 minutes. Out of credits notifies and checks every 15 minutes. `server_error` nudges every 5 minutes. `authentication_failed`, `model_not_found` and other errors are not retried and only notify. Background sessions are watched through `claude agents --json --all` and restarted with `claude respawn <id>`. A launchd job relaunches Ghostty if it crashes. |
-| Keep alive events | Events go to an events file. A Claude Code Mod in each session submits events about that session's own workers as prompts, through `$.prompt.submit` and gated on the session being idle, as the likethis Mod does, so an orchestrator can handle them unattended. Ghostty also shows a macOS notification unless the overnight switch is on. |
+| Keep alive Mod (phase 3b) | Keep alive writes events to the events file and notifies on its own. A Claude Code Mod in each session submits events about that session's own workers as prompts, through `$.prompt.submit` and gated on the session being idle, as the likethis Mod does, so an orchestrator can handle them unattended. Ghostty also shows a macOS notification unless the overnight switch is on, through `KeepAlive.notificationsSuppressed`. |
 | Usage cutoff | Ported from the watchdog. It rebuilds 5-hour usage windows from transcript timestamps and winds work down so the workday starts in a window that is at most about half used and resets within 2 hours. The constants (workday start 10:00, usable 2 hours, margin 15 minutes, warning 25 minutes) become settings. |
 | Overnight switch | Until the workday start it turns on keep alive and the usage cutoff for every tab running an agent and sets the sleep guard to Auto. It turns itself off in the morning. |
 | Weekly release check | It checks GitHub releases of `ghostty-org/ghostty` and reports only minor releases such as 1.4.0, not patches. It shows a notice that reuses Ghostty's update pill (`macos/Sources/Features/Update/UpdatePill.swift`) and a macOS notification, both linking to the release. It compares against the fork's recorded base version, which is `v1.3.1` today and is updated on each upstream merge. |

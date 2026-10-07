@@ -52,6 +52,9 @@ class TerminalRestorableState: TerminalRestorable {
     /// Optional so that state saved before tab groups existed still decodes.
     let tabGroupName: String?
 
+    /// Optional so that state saved before keep alive existed still decodes.
+    let keepAlive: Bool?
+
     init(from controller: TerminalController) {
         self.focusedSurface = controller.focusedSurface?.id.uuidString
         self.surfaceTree = controller.surfaceTree
@@ -59,6 +62,7 @@ class TerminalRestorableState: TerminalRestorable {
         self.tabColor = (controller.window as? TerminalWindow)?.tabColor ?? .none
         self.titleOverride = controller.titleOverride
         self.tabGroupName = (controller.window as? TerminalWindow)?.tabGroupName
+        self.keepAlive = (controller.window as? TerminalWindow)?.keepAlive
     }
 
     required init(copy other: TerminalRestorableState) {
@@ -68,6 +72,7 @@ class TerminalRestorableState: TerminalRestorable {
         self.tabColor = other.tabColor
         self.titleOverride = other.titleOverride
         self.tabGroupName = other.tabGroupName
+        self.keepAlive = other.keepAlive
     }
 }
 
@@ -129,6 +134,7 @@ class TerminalWindowRestoration: NSObject, NSWindowRestoration {
         // Restore our tab color
         (window as? TerminalWindow)?.tabColor = state.tabColor
         (window as? TerminalWindow)?.tabGroupName = state.tabGroupName
+        (window as? TerminalWindow)?.keepAlive = state.keepAlive ?? false
 
         // Restore the tab title override
         c.titleOverride = state.titleOverride

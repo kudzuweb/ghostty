@@ -3799,6 +3799,61 @@ term: []const u8 = "xterm-ghostty",
 /// Changing this configuration at runtime takes effect on reload.
 @"sleep-guard-grace": Duration = .{ .duration = 120 * std.time.ns_per_s },
 
+/// How many times keep alive may relaunch a crashed session in one tab, or
+/// respawn one background session, within any 60 minutes. The next attempt
+/// marks the tab "gave up" and emits a `gave_up` event instead of relaunching.
+/// Keep alive is a macOS-only feature of this fork, switched on per tab from
+/// the tab's right-click menu.
+///
+/// Changing this configuration at runtime takes effect on reload.
+@"keep-alive-max-crashes": u32 = 3,
+
+/// How often keep alive types `continue` into a Claude Code session that is
+/// idle on a `server_error` API error.
+///
+/// The value uses the same duration format as `undo-timeout`, for example
+/// `5m` or `300s`.
+///
+/// Changing this configuration at runtime takes effect on reload.
+@"keep-alive-server-error-interval": Duration = .{ .duration = 5 * 60 * std.time.ns_per_s },
+
+/// How often keep alive types `continue` into a Claude Code session that is
+/// idle on a `rate_limit` API error whose message gives no usable reset time
+/// (for example "out of usage credits"). A session-limit error that prints
+/// "resets <time> (<zone>)" is nudged once, just after that time, instead.
+///
+/// The value uses the same duration format as `undo-timeout`.
+///
+/// Changing this configuration at runtime takes effect on reload.
+@"keep-alive-rate-limit-interval": Duration = .{ .duration = 15 * 60 * std.time.ns_per_s },
+
+/// Whether keep alive restarts Claude Code background sessions that failed.
+///
+/// Valid values are:
+///
+///   * `failed` - Run `claude respawn <id>` for a background session whose
+///     state is `failed`, at most `keep-alive-max-crashes` times per hour per
+///     session. Sessions that were stopped or are done are never respawned.
+///   * `off` - Leave background sessions alone.
+///
+/// Changing this configuration at runtime takes effect on reload.
+@"keep-alive-background": KeepAliveBackground = .failed,
+
+/// Whether Ghostty installs a launchd job that reopens Ghostty after it
+/// crashes. A normal quit does not reopen it. When this is `false`, Ghostty
+/// removes the job.
+///
+/// Changing this configuration at runtime takes effect on reload.
+@"keep-alive-relaunch-ghostty": bool = false,
+
+/// The file keep alive appends one JSON line to for each event (`relaunched`,
+/// `gave_up`, `nudged`, `error_notified`, `respawned`). Missing directories
+/// are created. A leading `~` is the home directory. When unset, the file is
+/// `~/.local/state/ghostty/keep-alive-events.jsonl`.
+///
+/// Changing this configuration at runtime takes effect on reload.
+@"keep-alive-events-file": ?[:0]const u8 = null,
+
 /// This is set by the CLI parser for deinit.
 _arena: ?ArenaAllocator = null,
 
@@ -8957,6 +9012,12 @@ pub const MacWindowButtons = enum {
 pub const SleepGuardMode = enum {
     manual,
     auto,
+};
+
+/// The values of `keep-alive-background` (Mauria's fork).
+pub const KeepAliveBackground = enum {
+    failed,
+    off,
 };
 
 pub const MacTitlebarStyle = enum {

@@ -7,9 +7,14 @@ import Foundation
 enum AgentSessionResume {
     /// The command that resumes the session running as `pid`, or nil when it isn't one.
     static func command(forProcess pid: Int) -> String? {
+        session(forProcess: pid).map { $0.tool.resumeCommand(sessionID: $0.id) }
+    }
+
+    /// The tool and session id of the Claude Code or Codex session running as `pid`.
+    static func session(forProcess pid: Int) -> (tool: AgentTool, id: String)? {
         guard let pid = pid_t(exactly: pid) else { return nil }
-        if let id = claudeSessionID(pid: pid) { return "claude --resume \(id)" }
-        if let id = codexSessionID(pid: pid) { return "codex resume \(id)" }
+        if let id = claudeSessionID(pid: pid) { return (.claude, id) }
+        if let id = codexSessionID(pid: pid) { return (.codex, id) }
         return nil
     }
 

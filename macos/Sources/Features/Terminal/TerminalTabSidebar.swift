@@ -25,6 +25,9 @@ final class TerminalTabSidebarModel: ObservableObject {
 
         /// The name of the tab group the tab belongs to, if any.
         let group: String?
+
+        /// Whether keep alive watches the tab, and whether it gave up on it.
+        let keepAlive: KeepAliveTabState
     }
 
     /// A named tab group, drawn as one container holding its tabs.
@@ -142,7 +145,8 @@ final class TerminalTabSidebarModel: ObservableObject {
                 color: (tabWindow as? TerminalWindow)?.tabColor ?? .none,
                 // Our window is only on screen while it is the selected tab.
                 isSelected: tabWindow === window,
-                group: (tabWindow as? TerminalWindow)?.tabGroupName
+                group: (tabWindow as? TerminalWindow)?.tabGroupName,
+                keepAlive: (tabWindow as? TerminalWindow)?.keepAliveState ?? .off
             )
         }
 
@@ -206,6 +210,30 @@ final class TerminalTabSidebarModel: ObservableObject {
     func promptTitle(_ tab: Tab) {
         select(tab)
         controller(for: tab)?.promptTabTitle()
+    }
+
+    // MARK: Keep Alive
+
+    func setKeepAlive(_ isOn: Bool, for tab: Tab) {
+        (tabWindow(for: tab) as? TerminalWindow)?.keepAlive = isOn
+    }
+
+    /// Clears a gave-up tab's crash count so keep alive tries it again.
+    func retryKeepAlive(for tab: Tab) {
+        (tabWindow(for: tab) as? TerminalWindow)?.keepAliveGaveUp = false
+    }
+
+    private func keepAliveItem(for tab: Tab) -> NSMenuItem {
+        if tab.keepAlive == .gaveUp {
+            return menuItem("Keep alive: gave up, try again", symbol: "exclamationmark.arrow.circlepath") { [weak self] in
+                self?.retryKeepAlive(for: tab)
+            }
+        }
+        let item = menuItem("Keep alive", symbol: "arrow.clockwise.circle") { [weak self] in
+            self?.setKeepAlive(tab.keepAlive == .off, for: tab)
+        }
+        item.state = tab.keepAlive == .off ? .off : .on
+        return item
     }
 
     func setColor(_ color: TerminalTabColor, for tab: Tab) {
@@ -358,6 +386,7 @@ final class TerminalTabSidebarModel: ObservableObject {
             self?.promptTitle(tab)
         })
         menu.addItem(groupSubmenu(for: tab))
+        menu.addItem(keepAliveItem(for: tab))
 
         let palette = NSHostingView(rootView: TabColorMenuView(selectedColor: tab.color) { [weak self] color in
             self?.setColor(color, for: tab)
@@ -757,6 +786,31 @@ private struct TerminalTabSidebarRow: View {
                         .padding(3)
                 }
             }
+            .overlay(alignment: .bottomTrailing) {
+                if tab.keepAlive != .off {
+                    keepAliveBadge.padding(2)
+                }
+            }
+    }
+
+    /// The small icon for a kept-alive tab: a refresh arrow while it is being watched, and a
+    /// red warning once keep alive gave up on it.
+    @ViewBuilder
+    private var keepAliveBadge: some View {
+        switch tab.keepAlive {
+        case .off:
+            EmptyView()
+        case .on:
+            Image(systemName: "arrow.clockwise.circle.fill")
+                .font(.system(size: 10))
+                .foregroundStyle(.secondary)
+                .help("Keep alive")
+        case .gaveUp:
+            Image(systemName: "exclamationmark.triangle.fill")
+                .font(.system(size: 10))
+                .foregroundStyle(.red)
+                .help("Keep alive gave up: this tab's session kept crashing")
+        }
     }
 
     private var row: some View {
@@ -781,6 +835,10 @@ private struct TerminalTabSidebarRow: View {
                 .truncationMode(.tail)
 
             Spacer(minLength: 4)
+
+            if tab.keepAlive != .off {
+                keepAliveBadge
+            }
 
             if let keyEquivalent = tab.keyEquivalent {
                 Text(keyEquivalent)
