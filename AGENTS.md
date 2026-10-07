@@ -1,3 +1,11 @@
+# This is Mauria's fork
+
+Read `FORK.md` at the repo root first. It lists every difference from stock Ghostty, how to build and install the fork, and how to merge upstream releases.
+
+- Every change that adds, removes or alters a deviation, a setting, a theme, a build step or a gotcha updates `FORK.md` in the same commit.
+- `fork/config.ghostty` and `fork/themes/` are copies of Mauria's live config and themes. Update the copies when the live files change.
+- The text below is upstream's and stays untouched, so merges from upstream stay clean.
+
 # Agent Development Guide
 
 A file for [guiding coding agents](https://agents.md/).
