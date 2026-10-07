@@ -24,7 +24,7 @@ active_identifier=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$act
 printf 'Candidate: %s\nRevision: %s\nStage: %s\nInstalled backup source: %s\nActive backup source: %s\n' "$source_app" "$revision" "$destination" "$installed_app" "$active_app"
 if [[ "$mode" == dry-run ]]; then exit; fi
 mkdir -p "$destination/candidate" "$destination/previous-installed" "$destination/previous-active" "$destination/state" "$destination/receipts"
-/usr/bin/ditto "$source_app" "$destination/candidate/Ghostty.app"
+/usr/bin/ditto -c -k --sequesterRsrc --keepParent "$source_app" "$destination/candidate/Ghostty.app.zip"
 /usr/bin/ditto -c -k --sequesterRsrc --keepParent "$installed_app" "$destination/previous-installed/Ghostty.app.zip"
 /usr/bin/ditto -c -k --sequesterRsrc --keepParent "$active_app" "$destination/previous-active/Ghostty.app.zip"
 python3 - "$source_app" "$active_app" "$installed_app" "$revision" "$destination" <<'MANIFEST'
@@ -34,7 +34,7 @@ def identity(path):
     executable = pathlib.Path(path)/'Contents/MacOS/ghostty'
     return {'source_path': path, 'executable_sha256': hashlib.sha256(executable.read_bytes()).hexdigest()}
 manifest = {'prepared_at_utc': datetime.datetime.now(datetime.timezone.utc).isoformat(),
-            'candidate': dict(identity(candidate), revision=revision, backup='candidate/Ghostty.app'),
+            'candidate': dict(identity(candidate), revision=revision, backup='candidate/Ghostty.app.zip', archive_format='ditto-zip'),
             'previous_active': dict(identity(active), backup='previous-active/Ghostty.app.zip', archive_format='ditto-zip'),
             'previous_installed': dict(identity(installed), backup='previous-installed/Ghostty.app.zip', archive_format='ditto-zip'),
             'canonical_target': '/Applications/Ghostty.app',
@@ -56,10 +56,11 @@ for item in "$snapshot_home/Library/Application Support/com.mitchellh.ghostty" \
         /usr/bin/ditto "$item" "$destination/state/$name"
     fi
 done
-/usr/bin/codesign --verify --strict "$destination/candidate/Ghostty.app"
+/usr/bin/unzip -tq "$destination/candidate/Ghostty.app.zip"
 cat > "$destination/INSTALL-AND-ROLLBACK.txt" <<'PLAN'
 Prepared only; no installation or app/process/job/permission changes have occurred.
-Read transaction.json: previous-active and previous-installed are distinct ZIP archives.
+Read transaction.json: candidate, previous-active and previous-installed are distinct ZIP
+archives. Staging creates no runnable app copies, even if preparation fails.
 Extract with ditto -x -k ARCHIVE NEW_DIRECTORY; the preserved bundle keeps its original
 basename. Verify its executable hash against transaction.json and codesign --verify
 --deep before restoration. Finder custom-icon metadata added after launch can fail strict
@@ -77,8 +78,11 @@ exact paths after use; runnable production-ID backups can confuse permission rel
    lease or in-flight mutation remains. Verify sleep ownership released to its initial
    state. Refresh config/preferences/saved-state/recovery backups AFTER quit into a new
    post-quit snapshot; never overwrite preliminary evidence.
-3. Copy candidate/Ghostty.app to /Applications/.Ghostty-staged.app on that same volume;
-   verify canonical ID, signature, source stamp and hash. Rename existing installed bundle
+3. Extract candidate/Ghostty.app.zip into a new temporary directory on /Applications
+   volume, then move its bundle to /Applications/.Ghostty-staged.app. Verify canonical ID,
+   strict signature, source stamp and hash before replacement. On any failure, unregister
+   and remove only the exact temporary extracted/staged app paths; retain the ZIP archives
+   and diagnostics. Rename existing installed bundle
    aside only for the atomic exchange, then staged to /Applications/Ghostty.app. Archive
    the inactive displaced bundle with ditto -c -k --sequesterRsrc --keepParent and verify
    an independent extraction before removing that runnable copy. Preserve both ZIP
@@ -87,8 +91,8 @@ exact paths after use; runnable production-ID backups can confuse permission rel
 4. Narrow LaunchServices operations: unregister the now-inactive original active bundle
    path if it differs from the canonical target and each exact inactive production-ID
    candidate/backup path, then force-register the new canonical target. Verify bundle-ID
-   resolution selects /Applications/Ghostty.app. Archive inactive candidate copies after
-   successful installation so they cannot be rediscovered as competing applications.
+   resolution selects /Applications/Ghostty.app. Unregister and remove the exact temporary
+   extracted app paths after use, on success or failure, preserving the ZIP archives.
    Do not reset LaunchServices or TCC. Redirect inspected login/Dock/automation references
    to canonical /Applications path only when they currently target the original bundle.
    Keep a before/after reference manifest so rollback can restore those exact entries.

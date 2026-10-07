@@ -23,11 +23,12 @@ with tempfile.TemporaryDirectory(prefix='ghostty-staging-') as tmp:
     subprocess.run([helper, 'dry-run', str(candidate), str(destination)], env=environment, check=True, capture_output=True)
     assert not destination.exists(), 'dry-run must create no stage or backups'
     subprocess.run([helper, 'prepare', str(candidate), str(destination)], env=environment, check=True, capture_output=True)
-    assert plistlib.loads((destination/'candidate/Ghostty.app/Contents/Info.plist').read_bytes())['GhosttyForkRevision'] == 'candidate-fixture'
     import zipfile
     def archived_revision(relative, basename):
         with zipfile.ZipFile(destination/relative) as archive:
             return plistlib.loads(archive.read(basename + '/Contents/Info.plist'))['GhosttyForkRevision']
+    assert archived_revision('candidate/Ghostty.app.zip', 'Candidate.app') == 'candidate-fixture'
+    assert not list(destination.rglob('*.app')), 'staging must retain no runnable app copies'
     assert archived_revision('previous-installed/Ghostty.app.zip', 'Installed.app') == 'previous-installed-fixture'
     assert any(p.read_text() == 'fixture-state\n' for p in (destination/'state').rglob('config.ghostty'))
     assert archived_revision('previous-active/Ghostty.app.zip', 'Active.app') == 'previous-active-fixture'
