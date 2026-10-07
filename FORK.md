@@ -58,14 +58,27 @@ The change is `04dc7d039` plus `122dbdc44`, in `macos/Sources/Features/SleepGuar
 
 | Part | Detail |
 |---|---|
-| The control | A button in the sidebar header shows whether the Mac may sleep with the lid closed, by reading `pmset -g` for the `disablesleep` flag. Its menu has the current state, a manual toggle and a Mode submenu. |
-| Manual and Auto modes | The mode is stored in `UserDefaults` as `SleepGuardMode`. Manual leaves the flag to the toggle. Auto blocks sleep while any terminal has a foreground program that is not an idle shell, or any process named `claude` or `codex` on a terminal's TTY, and allows sleep after a grace period. |
-| Grace period | It defaults to 120 seconds and is read from `UserDefaults` as `SleepGuardGraceSeconds`. |
+| The control | A button in the sidebar header shows whether the Mac may sleep with the lid closed, by reading `pmset -g` for the `disablesleep` flag. Its menu has the current state, a manual toggle and a Mode submenu; choosing a mode writes `sleep-guard-mode` to the config file and reloads. |
+| Manual and Auto modes | The mode is the `sleep-guard-mode` config key (see "Settings panel and fork config keys"); it was a `UserDefaults` value before. Manual leaves the flag to the toggle. Auto blocks sleep while any terminal has a foreground program that is not an idle shell, or any process named `claude` or `codex` on a terminal's TTY, and allows sleep after a grace period. |
+| Grace period | It is the `sleep-guard-grace` config key and defaults to 120 seconds. |
 | Failed flips | A floating Sleep Guard panel states the error. It closes itself after 30 seconds and is reused rather than stacked. Auto retries after 30 seconds. |
 | Quitting | Quitting Ghostty in Auto mode undoes a block that Auto set, so a forgotten block does not drain a laptop in a bag. |
 | Requirement | An existing `NOPASSWD` sudoers rule must allow exactly `/usr/bin/pmset -a disablesleep 1` and `/usr/bin/pmset -a disablesleep 0`. Without it Auto fails every retry and the panel appears. The rule is outside this repo; on `home-laptop` it was confirmed with `sudo -n -l` on 2026-10-07. |
 | Menu bar icon | The icon is switched off. The code that creates the menu bar status item is commented out in `SleepGuard.swift`, with a note, so it can be restored by uncommenting it. |
 | NoDoz leftovers | NoDoz's unported code (commented out) and its icon are in `macos/Sources/Features/SleepGuard/NoDoz/`. |
+
+### Settings panel and fork config keys
+
+The change is in `src/config/Config.zig` (the keys), `macos/Sources/Features/Settings/` (the editor and the panel) and `macos/Sources/Features/SleepGuard/SleepGuard.swift`. The panel edits the live config file, so the file stays the single source: Mauria uses the panel, and agents can edit the same file by hand. The panel does not watch the file, and a hand edit made while the window is open shows there only after the window is closed and Ghostty is relaunched. Ghostty itself applies a hand edit on its normal config reload.
+
+| Part | Detail |
+|---|---|
+| Config keys | `sleep-guard-mode` is an enum, `manual` or `auto`, default `manual`. `sleep-guard-grace` is a Ghostty duration such as `120s` or `2m` (a bare number is rejected), default `120s`. Both sit in one block in `Config.zig` marked as the fork's, just before the `_arena` field. Swift reads them through `ghostty_config_get`, in `Ghostty.Config.sleepGuardMode` and `sleepGuardGrace`. |
+| Sleep guard reads the config | `SleepGuard.apply(_:)` takes both values at launch and on every config reload, from `AppDelegate.ghosttyConfigDidChange(config:)`. The old `UserDefaults` keys `SleepGuardMode` and `SleepGuardGraceSeconds` are gone and any value stored in them is ignored. |
+| Config file editor | `ConfigFileEditor` (text only) and `ConfigFile` (file and reload). The file is the path `ghostty_config_open_path()` returns, which Ghostty creates when missing. Setting a key rewrites the last active `key = ...` line (the last occurrence wins in Ghostty, so rewriting an earlier line would have no effect), or appends it, and every other line is kept byte for byte. Fork keys are appended under a `# Mauria's fork settings` comment created once. The write is atomic through the resolved symlink target, then `reloadConfig()` runs. |
+| Panel | A gear button in the sidebar header, in the expanded and collapsed sidebar, opens the Settings window (`ForkSettingsPanelController`). Appearance has a searchable theme list of the custom themes in `~/.config/ghostty/themes/` (or `$XDG_CONFIG_HOME`) and the themes bundled in the app, marks the current `theme` line, and writes `theme = <name>` when one is chosen. It also shows `macos-titlebar-style` read-only. Sleep guard has the mode picker and the grace period in seconds (applied on Return). The footer has "Open config file" and "Fork notes". |
+| Adding a section | Write a view that wraps its controls in `ForkSettingsSection` and list it in `ForkSettingsView` in `ForkSettingsPanel.swift`. |
+| Limits | The current theme is read from the config file, because `theme` is not exposed through `ghostty_config_get`. A value set on the command line overrides the file after a reload. A `light:...,dark:...` theme value is shown as "not in the list". |
 
 ### Backports from upstream
 
@@ -120,6 +133,7 @@ Both launchers address `/Applications/Ghostty.app` by absolute path.
 | File | Why it conflicts |
 |---|---|
 | `macos/Sources/Features/Terminal/TerminalTabSidebar.swift` | The sidebar came from an unmerged upstream pull request and was restyled and extended with groups, theme colors and the sleep guard button. This is the main hot spot. |
+| `src/config/Config.zig` | The fork's config keys live in one marked block before the `_arena` field, plus the `SleepGuardMode` enum next to `MacTitlebarStyle`. Keep both when merging. |
 | `include/ghostty.h` | Upstream renamed every C API declaration with a `GHOSTTY_API` prefix after 1.3, so backports touching it conflict. Keep the release's style and add the new declarations. |
 | `src/pty.zig`, `src/build/SharedDeps.zig` and `src/termio/` | These hold the backported process-info code and may already be applied upstream. |
 | `macos/Ghostty.sdef` | The fork adds properties here, and `macos/AGENTS.md` fixes the order of top-level definitions: classes, records, enums, commands. |
@@ -140,7 +154,6 @@ These are Mauria's decisions and none is built yet.
 
 | Item | Decision |
 |---|---|
-| Settings panel | A gear in the sidebar header opens a panel that edits the same `config.ghostty` file, with conflicts handled as they arise. The fork's settings become real Ghostty config keys. It includes a theme picker that writes `theme =`. Agents can edit the same file. |
 | Keep alive | It replaces the watchdog daemon at `scripts/watchdog` in `claudemonorepo`, and each tab has a right-click toggle. A crashed session is relaunched with `--resume` in the same tab, at most 3 crashes in any 60 minutes, then the tab is marked "gave up". On a session-limit `rate_limit` error it nudges "continue" just after the reset time printed in the message, otherwise every 15 minutes. Out of credits notifies and checks every 15 minutes. `server_error` nudges every 5 minutes. `authentication_failed`, `model_not_found` and other errors are not retried and only notify. Background sessions are watched through `claude agents --json --all` and restarted with `claude respawn <id>`. A launchd job relaunches Ghostty if it crashes. |
 | Keep alive events | Events go to an events file. A Claude Code Mod in each session submits events about that session's own workers as prompts, through `$.prompt.submit` and gated on the session being idle, as the likethis Mod does, so an orchestrator can handle them unattended. Ghostty also shows a macOS notification unless the overnight switch is on. |
 | Usage cutoff | Ported from the watchdog. It rebuilds 5-hour usage windows from transcript timestamps and winds work down so the workday starts in a window that is at most about half used and resets within 2 hours. The constants (workday start 10:00, usable 2 hours, margin 15 minutes, warning 25 minutes) become settings. |

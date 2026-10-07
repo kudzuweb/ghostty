@@ -758,6 +758,8 @@ class AppDelegate: NSObject,
     }
 
     private func ghosttyConfigDidChange(config: Ghostty.Config) {
+        MainActor.assumeIsolated { SleepGuard.shared.apply(config) }
+
         // Update the config we need to store
         self.derivedConfig = DerivedConfig(config)
 

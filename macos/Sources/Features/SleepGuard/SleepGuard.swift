@@ -75,11 +75,9 @@ final class SleepGuard: NSObject, ObservableObject, NSMenuDelegate {
         case auto
     }
 
-    static let modeKey = "SleepGuardMode"
-
     /// How long Auto waits after the last program finished before allowing sleep again.
-    static let graceKey = "SleepGuardGraceSeconds"
-    static let defaultGraceSeconds: TimeInterval = 120
+    /// Read from the `sleep-guard-grace` config key.
+    private(set) var graceSeconds: TimeInterval = 120
 
     /// The last value read from pmset. Nil when it couldn't be read.
     @Published private(set) var blocked: Bool? {
@@ -107,19 +105,11 @@ final class SleepGuard: NSObject, ObservableObject, NSMenuDelegate {
     /// failing every tick.
     private var retryAfter = Date.distantPast
 
-    private var graceSeconds: TimeInterval {
-        let value = UserDefaults.ghostty.object(forKey: Self.graceKey) as? Double
-        return value ?? Self.defaultGraceSeconds
-    }
-
     // MARK: Lifecycle
 
     func start() {
         guard timer == nil else { return }
 
-        if let raw = UserDefaults.ghostty.string(forKey: Self.modeKey), let saved = Mode(rawValue: raw) {
-            mode = saved
-        }
         lastBusy = Date()
 
         // Kept to restore the menu bar icon; the sidebar button is the only control for now.
@@ -138,6 +128,22 @@ final class SleepGuard: NSObject, ObservableObject, NSMenuDelegate {
         NSWorkspace.shared.notificationCenter.addObserver(
             self, selector: #selector(didWake),
             name: NSWorkspace.didWakeNotification, object: nil)
+    }
+
+    /// Takes the mode and grace period from the config. Called at launch and on every
+    /// config reload, so editing `sleep-guard-mode` in the file or the settings panel
+    /// takes effect without a restart.
+    func apply(_ config: Ghostty.Config) {
+        let newMode = config.sleepGuardMode
+        graceSeconds = config.sleepGuardGrace
+        NSLog("SleepGuard config: mode=%@ grace=%.0fs", newMode.rawValue, graceSeconds)
+        guard newMode != mode else { return }
+        mode = newMode
+        // A manual choice owns the setting from here, so quitting must not undo it.
+        autoBlocked = false
+        retryAfter = .distantPast
+        lastBusy = Date()
+        if timer != nil { tick() }
     }
 
     /// Called as Ghostty quits. A block Auto set shouldn't outlive the app, or a forgotten
@@ -369,13 +375,15 @@ final class SleepGuard: NSObject, ObservableObject, NSMenuDelegate {
     @objc private func selectMode(_ sender: NSMenuItem) {
         guard let raw = sender.representedObject as? String,
               let newMode = Mode(rawValue: raw), newMode != mode else { return }
-        mode = newMode
-        UserDefaults.ghostty.set(raw, forKey: Self.modeKey)
-        // A manual choice owns the setting from here, so quitting must not undo it.
-        autoBlocked = false
-        retryAfter = .distantPast
-        lastBusy = Date()
-        tick()
+        setMode(newMode)
+    }
+
+    /// Writes `sleep-guard-mode` to the config file and reloads. The reload calls
+    /// `apply(_:)`, which changes the mode.
+    func setMode(_ newMode: Mode) {
+        if let error = ConfigFile.set("sleep-guard-mode", to: newMode.rawValue, underForkHeader: true) {
+            SleepGuardErrorPanel.shared.show(message: error, closeAfter: nil)
+        }
     }
 
     @objc private func toggleManually() {

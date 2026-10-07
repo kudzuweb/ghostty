@@ -3770,6 +3770,35 @@ term: []const u8 = "xterm-ghostty",
 /// This only works on macOS since only macOS has an auto-update feature.
 @"auto-update-channel": ?build_config.ReleaseChannel = null,
 
+// ---------------------------------------------------------------------
+// Mauria's fork: settings added by the fork, kept in one block so merges
+// from upstream conflict in one place. See FORK.md at the repository root.
+// ---------------------------------------------------------------------
+
+/// How the sleep guard decides whether the Mac may sleep with the lid closed.
+/// The sleep guard is a macOS-only feature of this fork, shown as a button
+/// in the vertical tab sidebar header.
+///
+/// Valid values are:
+///
+///   * `manual` - The sleep guard only changes lid sleep when you toggle it
+///     from its menu.
+///   * `auto` - The sleep guard blocks lid sleep while any terminal has a
+///     program running in it, and allows sleep again once `sleep-guard-grace`
+///     has passed after the last program finished.
+///
+/// Changing this configuration at runtime takes effect on reload.
+@"sleep-guard-mode": SleepGuardMode = .manual,
+
+/// How long the sleep guard in `auto` mode keeps blocking lid sleep after the
+/// last running program finishes. This setting has no effect in `manual` mode.
+///
+/// The value uses the same duration format as `undo-timeout`, for example
+/// `120s` or `2m`.
+///
+/// Changing this configuration at runtime takes effect on reload.
+@"sleep-guard-grace": Duration = .{ .duration = 120 * std.time.ns_per_s },
+
 /// This is set by the CLI parser for deinit.
 _arena: ?ArenaAllocator = null,
 
@@ -8924,6 +8953,12 @@ pub const MacWindowButtons = enum {
 };
 
 /// See macos-titlebar-style
+/// The values of `sleep-guard-mode` (Mauria's fork).
+pub const SleepGuardMode = enum {
+    manual,
+    auto,
+};
+
 pub const MacTitlebarStyle = enum {
     native,
     transparent,

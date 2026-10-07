@@ -510,6 +510,7 @@ struct TerminalTabSidebar: View {
                 VStack(spacing: 4) {
                     collapseButton
                     sleepGuardButton
+                    settingsButton
                     newTabButton
                 }
                 .padding(.top, 5)
@@ -526,6 +527,7 @@ struct TerminalTabSidebar: View {
                     collapseButton
                     Spacer()
                     sleepGuardButton
+                    settingsButton
                     newTabButton
                 }
                 .padding(.horizontal, 6)
@@ -572,6 +574,12 @@ struct TerminalTabSidebar: View {
     private var sleepGuardButton: some View {
         TerminalTabSidebarButton(systemName: sleepGuard.symbolName, label: sleepGuard.summary) {
             sleepGuard.popUpMenu()
+        }
+    }
+
+    private var settingsButton: some View {
+        TerminalTabSidebarButton(systemName: "gearshape", label: "Settings") {
+            ForkSettingsPanelController.shared.show()
         }
     }
 
