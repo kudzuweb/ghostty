@@ -502,12 +502,14 @@ struct TerminalTabSidebar: View {
 
     @ObservedObject var model: TerminalTabSidebarModel
     @Binding var isCollapsed: Bool
+    @ObservedObject private var sleepGuard = SleepGuard.shared
 
     var body: some View {
         VStack(spacing: 0) {
             if isCollapsed {
                 VStack(spacing: 4) {
                     collapseButton
+                    sleepGuardButton
                     newTabButton
                 }
                 .padding(.top, 5)
@@ -523,6 +525,7 @@ struct TerminalTabSidebar: View {
                 HStack {
                     collapseButton
                     Spacer()
+                    sleepGuardButton
                     newTabButton
                 }
                 .padding(.horizontal, 6)
@@ -563,6 +566,12 @@ struct TerminalTabSidebar: View {
             label: isCollapsed ? "Show Tab Sidebar" : "Hide Tab Sidebar"
         ) {
             isCollapsed.toggle()
+        }
+    }
+
+    private var sleepGuardButton: some View {
+        TerminalTabSidebarButton(systemName: sleepGuard.symbolName, label: sleepGuard.summary) {
+            sleepGuard.popUpMenu()
         }
     }
 
