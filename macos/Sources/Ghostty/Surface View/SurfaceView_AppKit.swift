@@ -2169,8 +2169,13 @@ extension Ghostty.SurfaceView {
     }
 
     override func performDragOperation(_ sender: any NSDraggingInfo) -> Bool {
-        let pb = sender.draggingPasteboard
+        return insertDropped(from: sender.draggingPasteboard)
+    }
 
+    /// Inserts the dragged pasteboard's contents into the terminal. Views that forward
+    /// drops to a surface, such as the window container over the tab sidebar, call this too.
+    @discardableResult
+    func insertDropped(from pb: NSPasteboard) -> Bool {
         let content: String?
         if let url = pb.string(forType: .URL) {
             // URLs first, they get escaped as-is.
