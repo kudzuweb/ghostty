@@ -202,7 +202,7 @@ Custom themes live in `~/.config/ghostty/themes/`, and copies are in `fork/theme
 |---|---|
 | `Black` | Black background with white text, matching Mauria's Warp setup. |
 | `Nu Disco` | Adapted from the MIT-licensed VS Code theme by dbanksdesign (`dbanksdesign/nu-disco-vscode-theme`). Translucent colors are flattened onto the background because Ghostty palettes have no alpha, and the normal and bright ANSI sets are swapped so terminal output matches the editor's look. |
-| `Nu-er Disco` | Mauria's active theme since 2026-10-07: a warmer, darker, softer palette sampled from a neon-lit reference image. It has a plum background (`#170920`), with the purple hues nudged just 4 degrees toward blue while preserving brightness and saturation, and its accents are about 10% darker and 15% less saturated than the raw sampling, because she found saturated accents tiring ("my eyes don't settle"). The original `Nu Disco` is kept as an option. |
+| `Nu-er Disco` | Mauria's active theme since 2026-10-07: a warmer, darker, softer palette sampled from a neon-lit reference image. It has a plum background (`#170920`), with the purple hues nudged just 4 degrees toward blue while preserving brightness and saturation, and its accents are about 10% darker and 15% less saturated than the raw sampling, because she found saturated accents tiring ("my eyes don't settle"). Pale foreground (`#e5dce3`) and ANSI 7 (`#c1b7c0`) have slightly less pink saturation at the same lightness. The original `Nu Disco` is kept as an option. |
 | `Solarized Dark Higher Contrast` | This is a built-in theme, not a file in the fork, and it is Mauria's Solarized option. |
 
 ## Integrations elsewhere
