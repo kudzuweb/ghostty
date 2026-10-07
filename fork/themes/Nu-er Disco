@@ -1,25 +1,26 @@
 # Nu-er Disco: a warmer, darker, softer take on Nu Disco, sampled from a neon-lit
-# room reference image (2026-10-07). Plum background; accents ~10% darker and ~15%
+# room reference image (2026-10-07). Plum background; purple hues nudged 4 degrees toward blue, keeping brightness
+# and saturation. Accents ~10% darker and ~15%
 # less saturated than the first sampling so the eye settles.
-background = #190920
-foreground = #e7dae4
-cursor-color = #cc65ba
-cursor-text = #190920
-selection-background = #401d4d
+background = #170920
+foreground = #e7dae5
+cursor-color = #cc65c1
+cursor-text = #170920
+selection-background = #3d1d4d
 selection-foreground = #ffffff
-palette = 0=#281232
+palette = 0=#261232
 palette = 1=#e67469
 palette = 2=#73d0a0
 palette = 3=#e6af74
 palette = 4=#6babe6
-palette = 5=#cc65ba
+palette = 5=#cc65c1
 palette = 6=#50d1da
-palette = 7=#c3b5c1
-palette = 8=#664a75
+palette = 7=#c3b5c2
+palette = 8=#634a75
 palette = 9=#e68c84
 palette = 10=#96dab7
 palette = 11=#e6c28c
 palette = 12=#8ebbe6
-palette = 13=#da8aca
+palette = 13=#da8acf
 palette = 14=#8fdde2
 palette = 15=#f2f2f2
