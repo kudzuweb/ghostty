@@ -54,6 +54,7 @@ class TerminalViewContainer: NSView {
 
     private func setup() {
         addSubview(terminalView)
+        registerForDraggedTypes(Array(Ghostty.SurfaceView.dropTypes))
         terminalView.translatesAutoresizingMaskIntoConstraints = false
         NSLayoutConstraint.activate([
             terminalView.topAnchor.constraint(equalTo: topAnchor),
@@ -61,6 +62,31 @@ class TerminalViewContainer: NSView {
             terminalView.bottomAnchor.constraint(equalTo: bottomAnchor),
             terminalView.trailingAnchor.constraint(equalTo: trailingAnchor),
         ])
+    }
+
+    // MARK: Drag and drop
+
+    // A terminal surface accepts drops over its own area. Everywhere else in the window,
+    // such as the tab sidebar, lands here and goes to the window's focused surface.
+
+    private var dropTarget: Ghostty.SurfaceView? {
+        (window?.windowController as? BaseTerminalController)?.focusedSurface
+    }
+
+    override func draggingEntered(_ sender: any NSDraggingInfo) -> NSDragOperation {
+        guard let target = dropTarget else { return [] }
+        return target.draggingEntered(sender)
+    }
+
+    override func draggingUpdated(_ sender: any NSDraggingInfo) -> NSDragOperation {
+        return draggingEntered(sender)
+    }
+
+    override func performDragOperation(_ sender: any NSDraggingInfo) -> Bool {
+        guard let target = dropTarget else { return false }
+        guard target.insertDropped(from: sender.draggingPasteboard) else { return false }
+        (window?.windowController as? BaseTerminalController)?.focusSurface(target)
+        return true
     }
 
     override func viewDidMoveToWindow() {
