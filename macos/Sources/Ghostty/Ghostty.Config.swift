@@ -682,6 +682,66 @@ extension Ghostty {
             return TimeInterval(v) / 1000
         }
 
+        /// `keep-alive-max-crashes`.
+        var keepAliveMaxCrashes: Int {
+            let defaultValue = 3
+            guard let config = self.config else { return defaultValue }
+            var v: CUnsignedInt = 0
+            let key = "keep-alive-max-crashes"
+            guard ghostty_config_get(config, &v, key, UInt(key.lengthOfBytes(using: .utf8))) else { return defaultValue }
+            return Int(v)
+        }
+
+        /// `keep-alive-server-error-interval`, in seconds.
+        var keepAliveServerErrorInterval: TimeInterval {
+            durationSeconds("keep-alive-server-error-interval", default: 300)
+        }
+
+        /// `keep-alive-rate-limit-interval`, in seconds.
+        var keepAliveRateLimitInterval: TimeInterval {
+            durationSeconds("keep-alive-rate-limit-interval", default: 900)
+        }
+
+        /// `keep-alive-background`. Falls back to `failed` when the key can't be read.
+        var keepAliveBackground: KeepAlive.BackgroundMode {
+            let defaultValue = KeepAlive.BackgroundMode.failed
+            guard let config = self.config else { return defaultValue }
+            var v: UnsafePointer<Int8>?
+            let key = "keep-alive-background"
+            guard ghostty_config_get(config, &v, key, UInt(key.lengthOfBytes(using: .utf8))) else { return defaultValue }
+            guard let ptr = v else { return defaultValue }
+            return KeepAlive.BackgroundMode(rawValue: String(cString: ptr)) ?? defaultValue
+        }
+
+        /// `keep-alive-relaunch-ghostty`.
+        var keepAliveRelaunchGhostty: Bool {
+            guard let config = self.config else { return false }
+            var v = false
+            let key = "keep-alive-relaunch-ghostty"
+            _ = ghostty_config_get(config, &v, key, UInt(key.lengthOfBytes(using: .utf8)))
+            return v
+        }
+
+        /// `keep-alive-events-file`, with `~` expanded. Nil when the key is unset, which
+        /// means the default path.
+        var keepAliveEventsFile: String? {
+            guard let config = self.config else { return nil }
+            var v: UnsafePointer<Int8>?
+            let key = "keep-alive-events-file"
+            guard ghostty_config_get(config, &v, key, UInt(key.lengthOfBytes(using: .utf8))) else { return nil }
+            guard let ptr = v else { return nil }
+            let path = String(cString: ptr)
+            return path.isEmpty ? nil : (path as NSString).expandingTildeInPath
+        }
+
+        /// A duration key in seconds. The C API reports durations in milliseconds.
+        private func durationSeconds(_ key: String, default defaultValue: TimeInterval) -> TimeInterval {
+            guard let config = self.config else { return defaultValue }
+            var v: UInt = 0
+            guard ghostty_config_get(config, &v, key, UInt(key.lengthOfBytes(using: .utf8))) else { return defaultValue }
+            return TimeInterval(v) / 1000
+        }
+
         var autoUpdate: AutoUpdate? {
             guard let config = self.config else { return nil }
             var v: UnsafePointer<Int8>?

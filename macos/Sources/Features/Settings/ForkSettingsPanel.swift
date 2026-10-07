@@ -55,6 +55,8 @@ private struct ForkSettingsView: View {
                     AppearanceSection()
                     Divider()
                     SleepGuardSection()
+                    Divider()
+                    KeepAliveSection()
                 }
                 .padding(20)
             }
@@ -211,6 +213,111 @@ private struct SleepGuardSection: View {
             return
         }
         errorMessage = ConfigFile.set("sleep-guard-grace", to: "\(seconds)s", underForkHeader: true)
+    }
+}
+
+// MARK: Keep alive
+
+private struct KeepAliveSection: View {
+    @State private var maxCrashes = ""
+    @State private var serverInterval = ""
+    @State private var rateInterval = ""
+    @State private var eventsFile = ""
+    @State private var background = KeepAlive.BackgroundMode.failed
+    @State private var relaunchGhostty = false
+    @State private var errorMessage: String?
+
+    var body: some View {
+        ForkSettingsSection(title: "Keep alive") {
+            Text("Turn keep alive on for a tab from its right-click menu.")
+                .font(.caption).foregroundStyle(.secondary)
+
+            field("Crashes allowed per hour", text: $maxCrashes, placeholder: "3") {
+                guard let count = Int(maxCrashes.trimmingCharacters(in: .whitespaces)), count >= 0 else {
+                    errorMessage = "Enter a whole number of crashes."
+                    return
+                }
+                set("keep-alive-max-crashes", "\(count)")
+            }
+            field("Server error retry interval", text: $serverInterval, placeholder: "5m") {
+                setDuration("keep-alive-server-error-interval", serverInterval)
+            }
+            field("Rate limit retry interval", text: $rateInterval, placeholder: "15m") {
+                setDuration("keep-alive-rate-limit-interval", rateInterval)
+            }
+
+            Picker("Background sessions", selection: Binding(
+                get: { background },
+                set: { background = $0; set("keep-alive-background", $0.rawValue) }
+            )) {
+                Text("Respawn failed").tag(KeepAlive.BackgroundMode.failed)
+                Text("Off").tag(KeepAlive.BackgroundMode.off)
+            }
+
+            Toggle("Reopen Ghostty after a crash", isOn: Binding(
+                get: { relaunchGhostty },
+                set: { relaunchGhostty = $0; set("keep-alive-relaunch-ghostty", $0 ? "true" : "false") }
+            ))
+
+            field("Events file", text: $eventsFile, placeholder: "~/.local/state/ghostty/keep-alive-events.jsonl",
+                  width: 240) {
+                let path = eventsFile.trimmingCharacters(in: .whitespaces)
+                guard !path.isEmpty else {
+                    errorMessage = "Enter a file path."
+                    return
+                }
+                set("keep-alive-events-file", path)
+            }
+
+            Text("Intervals are Ghostty durations such as 30s, 5m or 1h. Press Return to apply a field.")
+                .font(.caption).foregroundStyle(.secondary)
+            if let errorMessage {
+                Text(errorMessage).font(.caption).foregroundStyle(.red)
+            }
+        }
+        .onAppear(perform: load)
+    }
+
+    private func field(
+        _ title: String,
+        text: Binding<String>,
+        placeholder: String,
+        width: CGFloat = 80,
+        commit: @escaping () -> Void
+    ) -> some View {
+        HStack {
+            Text(title)
+            Spacer()
+            TextField(placeholder, text: text)
+                .textFieldStyle(.roundedBorder)
+                .multilineTextAlignment(.trailing)
+                .frame(width: width)
+                .onSubmit(commit)
+        }
+    }
+
+    private func load() {
+        let settings = KeepAlive.shared.settings
+        maxCrashes = String(settings.maxCrashes)
+        serverInterval = ConfigFile.value(of: "keep-alive-server-error-interval") ?? "5m"
+        rateInterval = ConfigFile.value(of: "keep-alive-rate-limit-interval") ?? "15m"
+        eventsFile = ConfigFile.value(of: "keep-alive-events-file") ?? ""
+        background = settings.background
+        relaunchGhostty = settings.relaunchGhostty
+    }
+
+    private func set(_ key: String, _ value: String) {
+        errorMessage = ConfigFile.set(key, to: value, underForkHeader: true)
+    }
+
+    /// Ghostty rejects a bare number as a duration, so require a unit.
+    private func setDuration(_ key: String, _ text: String) {
+        let value = text.trimmingCharacters(in: .whitespaces)
+        guard value.range(of: #"^(\d+\s*(y|w|d|h|m|s|ms|us|µs|ns)\s*)+$"#, options: .regularExpression) != nil else {
+            errorMessage = "Enter a duration with a unit, such as 30s or 5m."
+            return
+        }
+        set(key, value)
     }
 }
 

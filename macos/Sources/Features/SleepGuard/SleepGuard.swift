@@ -263,14 +263,14 @@ final class SleepGuard: NSObject, ObservableObject, NSMenuDelegate {
         return false
     }
 
-    private static let idleShells: Set<String> = [
+    static let idleShells: Set<String> = [
         "sh", "bash", "zsh", "fish", "dash", "ksh", "tcsh", "csh",
         "nu", "elvish", "xonsh", "pwsh",
         // The brief login(1) step before it execs the shell.
         "login",
     ]
 
-    private static func executableName(of pid: Int) -> String? {
+    static func executableName(of pid: Int) -> String? {
         var buffer = [CChar](repeating: 0, count: 4096)
         guard proc_pidpath(Int32(pid), &buffer, UInt32(buffer.count)) > 0 else { return nil }
         let path = String(cString: buffer)

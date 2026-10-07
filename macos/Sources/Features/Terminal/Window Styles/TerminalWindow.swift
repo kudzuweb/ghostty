@@ -83,6 +83,27 @@ class TerminalWindow: NSWindow {
         }
     }
 
+    /// Whether keep alive watches this window's tab: it relaunches a crashed Claude Code or
+    /// Codex session and nudges one stuck on an API error. Saved with window state. Turning
+    /// it off or on clears `keepAliveGaveUp`.
+    var keepAlive = false {
+        didSet {
+            guard keepAlive != oldValue else { return }
+            keepAliveGaveUp = false
+            invalidateRestorableState()
+            NotificationCenter.default.post(name: .terminalTabsDidChange, object: nil)
+        }
+    }
+
+    /// Whether keep alive stopped relaunching this tab's session because it crashed too
+    /// often. It is not saved, so a restored tab starts fresh.
+    var keepAliveGaveUp = false {
+        didSet {
+            guard keepAliveGaveUp != oldValue else { return }
+            NotificationCenter.default.post(name: .terminalTabsDidChange, object: nil)
+        }
+    }
+
     // MARK: NSWindow Overrides
 
     override var toolbar: NSToolbar? {

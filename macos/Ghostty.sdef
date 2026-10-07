@@ -78,6 +78,9 @@
       <property name="group color" code="GTgc" type="tab color" description="The color of this tab's sidebar group. Shared by every tab in the group; ignored for a tab that is not in one.">
         <cocoa key="groupColor"/>
       </property>
+      <property name="keep alive" code="GTka" type="boolean" description="Whether keep alive watches this tab: it relaunches a crashed Claude Code or Codex session and nudges one stuck on an API error.">
+        <cocoa key="keepAlive"/>
+      </property>
       <property name="focused terminal" code="GTfT" type="terminal" access="r" description="The currently focused terminal surface in this tab.">
         <cocoa key="focusedTerminal"/>
       </property>

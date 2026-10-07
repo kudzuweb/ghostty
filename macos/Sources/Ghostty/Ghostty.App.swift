@@ -1422,6 +1422,12 @@ extension Ghostty {
                 guard let surface = target.target.surface else { return }
                 guard let surfaceView = self.surfaceView(from: surface) else { return }
 
+                // Keep alive tells a deliberate exit from a crash by the exit status.
+                let finishedID = surfaceView.id
+                MainActor.assumeIsolated {
+                    KeepAlive.shared.commandFinished(in: finishedID, exitCode: v.exit_code)
+                }
+
                 // Determine if we even care about command finish notifications
                 guard let config = (NSApplication.shared.delegate as? AppDelegate)?.ghostty.config else { return }
                 switch config.notifyOnCommandFinish {
