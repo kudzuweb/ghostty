@@ -370,6 +370,12 @@ class AppDelegate: NSObject,
 
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
         let windows = NSApplication.shared.windows
+
+        // Window state is only saved again for windows marked as changed. Mark them all, so the
+        // state saved on quit records the Claude Code and Codex sessions running right now.
+        for window in windows where window is TerminalWindow {
+            window.invalidateRestorableState()
+        }
         if windows.isEmpty { return .terminateNow }
 
         // If we've already accepted to install an update, then we don't need to
