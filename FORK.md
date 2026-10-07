@@ -8,7 +8,7 @@ The fork is `kudzuweb/ghostty` on GitHub, a public fork of `ghostty-org/ghostty`
 
 ## Install and update
 
-The reliability changes have passed the acceptance checks listed below and await remaining drag/permission checks and a controlled daily installation. Building or staging a bundle does not update the running application. The production bundle ID remains `com.mitchellh.ghostty` so existing saved state stays in its current domain.
+The reliability changes have passed the acceptance checks listed below and await remaining drag/permission checks; repaired daily installation and normal quit/reopen have passed for two real Claude sessions. Building or staging a bundle does not update the running application. The production bundle ID remains `com.mitchellh.ghostty` so existing saved state stays in its current domain.
 
 | Step | What to do |
 |---|---|
@@ -67,9 +67,9 @@ Historical hashes below identify the original additions on `main` after `v1.3.1`
 | Persistence and exits | Failed/pending targets survive another immediate restart; stopped tombstones prevent older saved state reviving a deliberate exit. Deliberate/unknown completion clears stale remembered agents. Shutdown cancels input/discovery and saves cached associations. The journal cannot recreate layout newer than AppKit or create an absent tab. |
 | Addressing from automation | Capture the created tab's terminal UUID or enumerate existing terminal UUIDs, then recheck session, cwd, PID and TTY before acting. AppleScript tab/window IDs are current-object identifiers and change on restart; titles and tab positions are not unique identities. |
 
-A controlled real-Claude comparison on 2026-10-07 reproduced a launch-context regression: ordinary resume of the same session and cwd registered within 2.21 seconds, while adding only `CLAUDE_CONFIG_DIR=~/.claude` failed to register within 90 seconds and logged that hooks were waiting for workspace trust. Recovery therefore does not turn an inferred default directory into an explicit configuration override. Verification of the repaired installed-app restore remains pending.
+A controlled real-Claude comparison on 2026-10-07 reproduced a launch-context regression: ordinary resume of the same session and cwd registered within 2.21 seconds, while adding only `CLAUDE_CONFIG_DIR=~/.claude` failed to register within 90 seconds and logged that hooks were waiting for workspace trust. Recovery therefore does not turn an inferred default directory into an explicit configuration override. The repaired production installation then passed normal quit/reopen on 2026-10-07: both real Claude sessions resumed automatically in their original surface UUIDs and working directories, with new process IDs, fresh native capability readiness, and `configurationRootWasExplicit=false`. No recovery journal edits occurred between quit and reopen. The user confirmed closing the empty third tab, so the restored two-surface layout was expected; the third session remained running in Warp by her choice. Evidence: `outputs/Ghostty-restoration-repair/normal-reopen-acceptance.json` in the repair workspace. Custom roots are covered by unit tests; installed permission-driven restart and production Codex recovery remain unverified.
 
-A disposable GUI fixture verified manual retry and normal quit/reopen automatic resume for four exact surface/session UUID pairs. Installed permission-driven restart and production Claude/Codex registration still need their own acceptance; restoring a window is not a promise that every session can resume.
+A disposable GUI fixture verified manual retry and normal quit/reopen automatic resume for four exact surface/session UUID pairs. Installed permission-driven restart and production Codex registration still need their own acceptance; restoring a window is not a promise that every session can resume.
 
 ### Sleep guard
 
@@ -248,7 +248,7 @@ Both launchers address `/Applications/Ghostty.app` by absolute path.
 
 ## Reliability acceptance status
 
-Acceptance on 2026-10-07 for the reviewed source. These are bounded fixture results; daily installation and permission-driven restart remain separate.
+Acceptance on 2026-10-07 for the reviewed source. These include bounded fixture results and the repaired installed-app normal quit/reopen acceptance described above; permission-driven restart remains separate.
 
 | Check | Result |
 |---|---|
@@ -259,8 +259,8 @@ Acceptance on 2026-10-07 for the reviewed source. These are bounded fixture resu
 | GUI controls | Row selection, invalid-duration error, and draft preservation across unrelated apply/reload passed. AppKit selector/target-retention regression passed after repairing silent sidebar menu actions. End-to-end drag acceptance remains pending. |
 | Native Claude turn | Real isolated trial verified accepted request receipts, Unicode draft preservation before/during/after a native turn and hot reload, independent resumed-process mailbox and rejection of old-process requests (08:10:49 UTC evidence). |
 | Sleep | Owner-SIGKILL cleanup passed with the fixture backend. Installed narrow sudo privilege/real pmset and macOS permission continuity remain untested. |
-| Daily migration/install | Helpers capture/prepare only. Controlled quit, refreshed migration mapping/backups, actual executable/stamp/session verification, TCC restart and rollback remain pending. |
+| Daily migration/install | Repaired production installation and normal quit/reopen passed for two real Claude sessions with exact original surface/session UUIDs and cwd, new PIDs, and fresh native capability readiness, without journal edits between quit/reopen. The user intentionally closed the empty third tab and kept its session running in Warp. TCC restart, production Codex recovery and rollback remain unverified. |
 
 ## Planned work
 
-Complete end-to-end drag and installed permission acceptance, prepare the current migration mapping, then carry out the coordinated daily transaction. All concrete review findings have been addressed in source. Duplicate ownership checks prevent known live/recovering sessions from being launched again, but cannot atomically arbitrate a simultaneous start by an unrelated application. Tool metadata and Claude function-hook API compatibility remain maintenance dependencies.
+Complete end-to-end drag, installed permission-driven restart and production Codex recovery acceptance. All concrete review findings have been addressed in source. Duplicate ownership checks prevent known live/recovering sessions from being launched again, but cannot atomically arbitrate a simultaneous start by an unrelated application. Tool metadata and Claude function-hook API compatibility remain maintenance dependencies.
