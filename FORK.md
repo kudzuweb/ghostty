@@ -83,7 +83,7 @@ The change is in `src/config/Config.zig` (the keys), `macos/Sources/Features/Set
 
 ### Keep alive
 
-Keep alive replaces the watchdog daemon at `scripts/watchdog` in `claudemonorepo`, which is still there until it is retired (see "Planned work"). The code is in `macos/Sources/Features/KeepAlive/`: `KeepAliveLogic.swift` holds the decisions as pure functions, `UsageCutoff.swift` the usage cutoff computation, `KeepAlive.swift` the timer and the actions, and `KeepAliveRelaunchJob.swift` the launchd job. This is phase 3a; phase 3b, the Claude Code Mod that turns events into prompts, is the `keepalive-mod` plugin (see "Orchestrator Mod" below).
+Keep alive replaces the watchdog daemon that lived at `scripts/watchdog` in `claudemonorepo`; it was retired on 2026-10-07 and remains in that repo's git history. The code is in `macos/Sources/Features/KeepAlive/`: `KeepAliveLogic.swift` holds the decisions as pure functions, `UsageCutoff.swift` the usage cutoff computation, `KeepAlive.swift` the timer and the actions, and `KeepAliveRelaunchJob.swift` the launchd job. This is phase 3a; phase 3b, the Claude Code Mod that turns events into prompts, is the `keepalive-mod` plugin (see "Orchestrator Mod" below).
 
 | Part | Detail |
 |---|---|
@@ -228,8 +228,4 @@ Both launchers address `/Applications/Ghostty.app` by absolute path.
 
 ## Planned work
 
-These are Mauria's decisions and none of these rows is built yet. Keep alive, the usage cutoff, the overnight switch and the weekly release check are built; see "Keep alive", "Usage cutoff and overnight switch" and "Weekly release check".
-
-| Item | Decision |
-|---|---|
-| Retire the watchdog | Archive the script in git history, then remove it. |
+Nothing is planned right now. Everything decided so far is built; see the sections above.
