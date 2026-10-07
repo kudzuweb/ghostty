@@ -83,7 +83,7 @@ The change is in `src/config/Config.zig` (the keys), `macos/Sources/Features/Set
 
 ### Keep alive
 
-Keep alive replaces the watchdog daemon at `scripts/watchdog` in `claudemonorepo`, which is still there until it is retired (see "Planned work"). The code is in `macos/Sources/Features/KeepAlive/`: `KeepAliveLogic.swift` holds the decisions as pure functions, `KeepAlive.swift` the timer and the actions, and `KeepAliveRelaunchJob.swift` the launchd job. This is phase 3a; the Claude Code Mod that turns events into prompts is phase 3b.
+Keep alive replaces the watchdog daemon at `scripts/watchdog` in `claudemonorepo`, which is still there until it is retired (see "Planned work"). The code is in `macos/Sources/Features/KeepAlive/`: `KeepAliveLogic.swift` holds the decisions as pure functions, `KeepAlive.swift` the timer and the actions, and `KeepAliveRelaunchJob.swift` the launchd job. This is phase 3a; phase 3b, the Claude Code Mod that turns events into prompts, is the `keepalive-mod` plugin (see "Orchestrator Mod" below).
 
 | Part | Detail |
 |---|---|
@@ -98,6 +98,7 @@ Keep alive replaces the watchdog daemon at `scripts/watchdog` in `claudemonorepo
 | Ghostty relaunch job | See the next table. |
 | Events file | One JSON line per event is appended to `keep-alive-events-file`, creating missing directories. Fields: `time` (ISO 8601, UTC), `event` (`relaunched`, `gave_up`, `nudged`, `error_notified` or `respawned`), `tool`, `session_id`, `tab_title`, and `error_type` and `message` when relevant. |
 | Notifications | Every keep alive notification goes through `KeepAlive.notifyKeepAlive(title:body:)`, which skips the notification while `KeepAlive.notificationsSuppressed()` returns true. That closure is the hook for the overnight switch in a later phase. Notifications are for `gave_up`, for errors that are not retried, and for a rate limit with no usable reset time. A debug build is not authorized for notifications by macOS, so the notification path was exercised only as far as the authorization refusal. |
+| Orchestrator Mod (phase 3b) | The `keepalive-mod` plugin in `claudemonorepo` (`skills/keepalive-mod/`, loaded in every session) tails the events file and submits one `[keep-alive]` prompt into a session when events concern that session's own workers, so an orchestrator can handle them unattended. It learns workers from the session's own Bash calls (`claude --bg`, `claude --resume <id> --bg`, the handoff launcher's `launch.sh`), because no record links a background session or a tab to the session that started it. Matching is by `session_id` prefix (a background session's is the 8-hex id) or `tab_title`. It needs no change in this fork. Set `KEEPALIVE_EVENTS_FILE` if `keep-alive-events-file` is changed. Built 2026-10-07; its tests ran under `claude plugin test`, and it has not yet run against a live Ghostty event. |
 | Config keys | `keep-alive-max-crashes`, `keep-alive-server-error-interval`, `keep-alive-rate-limit-interval`, `keep-alive-background`, `keep-alive-relaunch-ghostty` and `keep-alive-events-file`, in the fork block of `Config.zig`, read through `Ghostty.Config` and re-read on reload. The Settings window has a Keep alive section for them. |
 
 What each API error does:
@@ -197,7 +198,6 @@ These are Mauria's decisions and none of these rows is built yet. Keep alive is 
 
 | Item | Decision |
 |---|---|
-| Keep alive Mod (phase 3b) | Keep alive writes events to the events file and notifies on its own. A Claude Code Mod in each session submits events about that session's own workers as prompts, through `$.prompt.submit` and gated on the session being idle, as the likethis Mod does, so an orchestrator can handle them unattended. Ghostty also shows a macOS notification unless the overnight switch is on, through `KeepAlive.notificationsSuppressed`. |
 | Usage cutoff | Ported from the watchdog. It rebuilds 5-hour usage windows from transcript timestamps and winds work down so the workday starts in a window that is at most about half used and resets within 2 hours. The constants (workday start 10:00, usable 2 hours, margin 15 minutes, warning 25 minutes) become settings. |
 | Overnight switch | Until the workday start it turns on keep alive and the usage cutoff for every tab running an agent and sets the sleep guard to Auto. It turns itself off in the morning. |
 | Weekly release check | It checks GitHub releases of `ghostty-org/ghostty` and reports only minor releases such as 1.4.0, not patches. It shows a notice that reuses Ghostty's update pill (`macos/Sources/Features/Update/UpdatePill.swift`) and a macOS notification, both linking to the release. It compares against the fork's recorded base version, which is `v1.3.1` today and is updated on each upstream merge. |
