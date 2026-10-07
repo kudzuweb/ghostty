@@ -740,6 +740,9 @@ extension Ghostty {
         /// `usage-cutoff-stop-sessions`.
         var usageCutoffStopSessions: Bool { boolValue("usage-cutoff-stop-sessions") }
 
+        /// `release-check`.
+        var releaseCheck: Bool { boolValue("release-check") }
+
         /// `overnight-run`.
         var overnightRun: Bool { boolValue("overnight-run") }
 

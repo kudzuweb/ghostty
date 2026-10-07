@@ -3926,6 +3926,15 @@ term: []const u8 = "xterm-ghostty",
 /// Changing this configuration at runtime takes effect on reload.
 @"overnight-run": bool = false,
 
+/// Whether Ghostty checks once a week for a new minor or major release of
+/// upstream Ghostty (Mauria's fork). A release newer than the fork's recorded
+/// base version shows as a pill in the update pill's place and as a macOS
+/// notification, both linking to the release page. Patch releases are not
+/// reported, and nothing is downloaded or installed.
+///
+/// Changing this configuration at runtime takes effect on reload.
+@"release-check": bool = true,
+
 /// This is set by the CLI parser for deinit.
 _arena: ?ArenaAllocator = null,
 

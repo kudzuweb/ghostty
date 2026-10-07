@@ -120,6 +120,7 @@ final class KeepAlive: ObservableObject {
     private static let stampsLifetime: TimeInterval = 300
     private var reachedWorkday: Date?
     private var lastLoggedCutoff: Date?
+    private var respawnHoldLogged = false
 
     /// Whether the overnight switch is on and has not yet reached the workday start.
     @Published private(set) var overnightActive = false
@@ -327,7 +328,7 @@ final class KeepAlive: ObservableObject {
             let snapshot = await fetchAgents()
             let context = await cutoffContext(for: tabs)
             process(tabs, snapshot: snapshot, cutoff: context)
-            if wantsBackground, let snapshot { await respawnFailed(snapshot.background) }
+            if wantsBackground, let snapshot, !(await respawnHeld()) { await respawnFailed(snapshot.background) }
             ticking = false
         }
     }
@@ -388,6 +389,28 @@ final class KeepAlive: ObservableObject {
         if reachedWorkday == workday { phase = .reached }
         guard phase != .clear, let cutoff = computed else { return nil }
         return CutoffContext(cutoff: cutoff, phase: phase, workday: workday)
+    }
+
+    /// Whether the usage cutoff holds background-session respawns back this tick. It applies
+    /// when `usage-cutoff` or the overnight switch is on, whether or not any tab is watched.
+    private func respawnHeld() async -> Bool {
+        let applies = settings.usageCutoff || overnightActive
+        var held = false
+        if applies {
+            let now = Date()
+            let workday = UsageCutoff.workday(after: now, workdayMinutes: settings.cutoff.workdayMinutes)
+            if reachedWorkday != workday { reachedWorkday = nil }
+            let stamps = await transcriptStamps(now: now)
+            let computed = UsageCutoff.cutoff(stamps: stamps, now: now, settings: settings.cutoff)
+            held = UsageCutoff.holdsRespawn(
+                applies: true, cutoff: computed, now: now, reachedWorkday: reachedWorkday, workday: workday)
+            if held { reachedWorkday = workday }
+        }
+        if held != respawnHoldLogged {
+            respawnHoldLogged = held
+            NSLog("KeepAlive: background respawns are %@", held ? "held until the workday starts" : "no longer held")
+        }
+        return held
     }
 
     private func process(_ tabs: [Tab], snapshot: KeepAliveAgents.Snapshot?, cutoff: CutoffContext?) {

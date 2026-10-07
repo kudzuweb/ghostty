@@ -151,3 +151,42 @@ struct KeepAliveRespawnLimiterTests {
         #expect(limiter.decide(failed: ["a", "b"], now: start.addingTimeInterval(10), limit: 3) == [.respawn("b")])
     }
 }
+
+struct RespawnHoldTests {
+    private let now = Date(timeIntervalSince1970: 1_000_000)
+    private let workday = Date(timeIntervalSince1970: 1_050_000)
+
+    private func held(
+        applies: Bool = true,
+        cutoff: Date?,
+        reached: Date? = nil
+    ) -> Bool {
+        UsageCutoff.holdsRespawn(applies: applies, cutoff: cutoff, now: now, reachedWorkday: reached, workday: workday)
+    }
+
+    @Test func notHeldWhenTheCutoffDoesNotApply() {
+        #expect(!held(applies: false, cutoff: now.addingTimeInterval(-60), reached: workday))
+    }
+
+    @Test func notHeldWithoutACutoff() {
+        #expect(!held(cutoff: nil))
+    }
+
+    @Test func notHeldBeforeTheCutoff() {
+        #expect(!held(cutoff: now.addingTimeInterval(60)))
+    }
+
+    @Test func heldAtAndAfterTheCutoff() {
+        #expect(held(cutoff: now))
+        #expect(held(cutoff: now.addingTimeInterval(-60)))
+    }
+
+    @Test func heldUntilTheWorkdayEvenIfTheCutoffMovesLater() {
+        #expect(held(cutoff: now.addingTimeInterval(3600), reached: workday))
+        #expect(held(cutoff: nil, reached: workday))
+    }
+
+    @Test func aReachMarkFromAnEarlierWorkdayHoldsNothing() {
+        #expect(!held(cutoff: nil, reached: workday.addingTimeInterval(-86400)))
+    }
+}
