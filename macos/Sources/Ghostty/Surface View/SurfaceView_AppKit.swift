@@ -1766,6 +1766,7 @@ extension Ghostty {
             case uuid
             case title
             case isUserSetTitle
+            case resumeCommand
         }
 
         required convenience init(from decoder: Decoder) throws {
@@ -1780,6 +1781,12 @@ extension Ghostty {
             let uuid = UUID(uuidString: try container.decode(String.self, forKey: .uuid))
             var config = Ghostty.SurfaceConfiguration()
             config.workingDirectory = try container.decode(String?.self, forKey: .pwd)
+
+            // A Claude Code or Codex session was running when the window was saved, so
+            // type the command that resumes it into the restored shell.
+            if let resumeCommand = try container.decodeIfPresent(String.self, forKey: .resumeCommand) {
+                config.initialInput = resumeCommand + "\n"
+            }
             let savedTitle = try container.decodeIfPresent(String.self, forKey: .title)
             let isUserSetTitle = try container.decodeIfPresent(Bool.self, forKey: .isUserSetTitle) ?? false
 
@@ -1801,6 +1808,9 @@ extension Ghostty {
             try container.encode(id.uuidString, forKey: .uuid)
             try container.encode(title, forKey: .title)
             try container.encode(titleFromTerminal != nil, forKey: .isUserSetTitle)
+            if let pid = surfaceModel?.foregroundPID {
+                try container.encodeIfPresent(AgentSessionResume.command(forProcess: pid), forKey: .resumeCommand)
+            }
         }
     }
 }
