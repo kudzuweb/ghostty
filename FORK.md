@@ -4,7 +4,7 @@ This file lists everything in this fork that differs from stock Ghostty, how to 
 
 ## What this fork is
 
-The fork is `kudzuweb/ghostty` on GitHub, a public fork of `ghostty-org/ghostty`. Locally `origin` is the fork and `upstream` is Ghostty's repository. `main` is Mauria's build. It follows Ghostty's releases, not upstream's development branch, and today it is based on the tag `v1.3.1`. Work happens on topic branches that merge into `main`. Only the macOS app has been changed or tested; the Linux GTK app is untouched and unused.
+The fork is `kudzuweb/ghostty` on GitHub, a public fork of `ghostty-org/ghostty`. On the home laptop `origin` is the fork and `upstream` is Ghostty's repository. The work-machine checkout has no remotes, by decision on 2026-10-08: its commits stay local, and changes made there travel to the fork as patches applied from a machine that holds the personal credentials, never by a push from the work account. `main` is Mauria's build. It follows Ghostty's releases, not upstream's development branch, and today it is based on the tag `v1.3.1`. Work happens on topic branches that merge into `main`. Only the macOS app has been changed or tested; the Linux GTK app is untouched and unused.
 
 ## Install and update
 
