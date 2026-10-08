@@ -1,0 +1,28 @@
+#!/bin/sh
+# Xcode 26.5's libtool (cctools_ld-1267) mis-reads the archives Zig 0.15.2 writes and silently
+# drops members: a nine-member libghostty.a came out with three to five, and libghostty_zcu.o,
+# which holds the whole C API, was among the dropped, so the Swift app failed to link with
+# hundreds of undefined _ghostty_* symbols. Re-archiving the same objects with Apple's ar first
+# makes libtool keep all of them. This shim does that for every .a argument, then runs the
+# real libtool. Zig writes archive members without permission bits, hence the chmod.
+set -eu
+work=$(mktemp -d "${TMPDIR:-/tmp}/libtool-shim.XXXXXX")
+trap 'rm -rf "$work"' EXIT
+n=0
+for a in "$@"; do
+    n=$((n + 1))
+    case "$a" in
+        *.a) if [ -f "$a" ]; then
+                 d="$work/$n"; mkdir -p "$d"
+                 abs=$(cd "$(dirname "$a")" && pwd)/$(basename "$a")
+                 if (cd "$d" && /usr/bin/ar -x "$abs" 2>/dev/null); then
+                     chmod u+rw "$d"/* 2>/dev/null || true
+                     /usr/bin/ar -rcs "$work/$n.a" "$d"/* 2>/dev/null
+                     a="$work/$n.a"
+                 fi
+             fi ;;
+    esac
+    set -- "$@" "$a"
+    shift
+done
+exec /usr/bin/libtool "$@"

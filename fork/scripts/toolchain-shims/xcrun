@@ -1,0 +1,14 @@
+#!/bin/sh
+# Zig finds the macOS SDK by running `xcrun --sdk macosx --show-sdk-path` from PATH.
+# build-daily.sh puts this directory first in PATH. When GHOSTTY_ZIG_SDK is set, that one
+# lookup answers with the chosen SDK instead of Xcode's. iOS SDK lookups, every other xcrun
+# call, and everything when GHOSTTY_ZIG_SDK is unset pass through to the real tool.
+if [ -n "${GHOSTTY_ZIG_SDK:-}" ]; then
+    want_path=0; macosx=0
+    for a in "$@"; do
+        [ "$a" = "--show-sdk-path" ] && want_path=1
+        [ "$a" = "macosx" ] && macosx=1
+    done
+    if [ "$want_path" = 1 ] && [ "$macosx" = 1 ]; then echo "$GHOSTTY_ZIG_SDK"; exit 0; fi
+fi
+exec /usr/bin/xcrun "$@"
