@@ -90,7 +90,6 @@ struct TerminalTabAgentDot: View {
 
     @Environment(\.terminalTabSidebarPalette) private var palette
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
-    @State private var isDim = false
 
     var body: some View {
         Group {
@@ -102,13 +101,16 @@ struct TerminalTabAgentDot: View {
             case .stopped:
                 filled(palette.statusColor(.stopped))
             case .working:
-                filled(palette.foreground ?? Color.primary)
-                    .opacity(reduceMotion || !isDim ? 1 : 0.35)
-                    .animation(
-                        reduceMotion ? nil : .easeInOut(duration: 0.9).repeatForever(autoreverses: true),
-                        value: isDim
-                    )
-                    .onAppear { isDim = true }
+                // Like Claude Code's own title spinner (◐ ◑ every 960 ms): a ring whose filled
+                // half switches sides. It holds on the left half under Reduce Motion.
+                if reduceMotion {
+                    halfFilled(palette.foreground ?? Color.primary, leftHalf: true)
+                } else {
+                    TimelineView(.periodic(from: .now, by: 0.96)) { context in
+                        let tick = Int(context.date.timeIntervalSinceReferenceDate / 0.96)
+                        halfFilled(palette.foreground ?? Color.primary, leftHalf: tick.isMultiple(of: 2))
+                    }
+                }
             case .error:
                 filled(palette.statusColor(.error))
             case .blocked:
@@ -118,6 +120,15 @@ struct TerminalTabAgentDot: View {
             }
         }
         .frame(width: size, height: size)
+    }
+
+    private func halfFilled(_ color: Color, leftHalf: Bool) -> some View {
+        Circle()
+            .fill(color)
+            .mask(alignment: leftHalf ? .leading : .trailing) {
+                Rectangle().frame(width: size / 2)
+            }
+            .overlay(Circle().strokeBorder(color, lineWidth: 1))
     }
 
     private func filled(_ color: Color) -> some View {
