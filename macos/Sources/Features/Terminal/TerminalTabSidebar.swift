@@ -814,9 +814,9 @@ private struct TerminalTabSidebarRow: View {
     let tab: TerminalTabSidebarModel.Tab
     let isCompact: Bool
 
-    /// Whether the row sits on a group's tinted block, where the selected tab needs a
-    /// stronger fill to stand out.
-    var isInGroup = false
+    /// The color of the group whose tinted block the row sits on, or nil for a tab that is
+    /// in no group. A grouped tab shows its group's color, not its own.
+    var groupColor: TerminalTabColor?
 
     @Environment(\.terminalTabSidebarPalette) private var palette
     @State private var isHovering = false
@@ -828,7 +828,12 @@ private struct TerminalTabSidebarRow: View {
             .font(.system(size: 13))
             .foregroundStyle(Color.primary.opacity(tab.isSelected ? 1 : 0.75))
             .frame(maxWidth: .infinity)
-            .background(Rectangle().fill(rowFill))
+            .background {
+                ZStack {
+                    Rectangle().fill(rowFill)
+                    Rectangle().fill(Color.primary.opacity(isHovering ? 0.06 : 0))
+                }
+            }
             .contentShape(Rectangle())
             .onTapGesture { model.select(tab) }
             .onHover { isHovering = $0 }
@@ -867,10 +872,29 @@ private struct TerminalTabSidebarRow: View {
         }
     }
 
-    /// Rows are flat: the selected tab gets a solid highlight, and a hovered one a lighter one.
+    /// Rows are flat. A tab outside any group is tinted with its own color; a tab in a group
+    /// sits on the group's block, so only the selected one gets a stronger fill. Hover is
+    /// drawn separately, on top of this.
     private var rowFill: Color {
-        if tab.isSelected { return Color.primary.opacity(isInGroup ? 0.16 : 0.12) }
-        return Color.primary.opacity(isHovering ? 0.06 : 0)
+        if let groupColor {
+            guard tab.isSelected else { return .clear }
+            guard !palette.isNeutral(groupColor), let accent = palette.color(for: groupColor) else {
+                return Color.primary.opacity(0.16)
+            }
+            return Color(nsColor: accent).opacity(0.24)
+        }
+
+        guard let color = palette.color(for: tab.color) else {
+            return tab.isSelected ? Color.primary.opacity(0.12) : .clear
+        }
+        let isYellow = tab.color == .yellow || tab.color == .brightYellow
+        let opacity = switch (tab.isSelected, isYellow) {
+        case (false, false): 0.14
+        case (true, false): 0.30
+        case (false, true): 0.10
+        case (true, true): 0.22
+        }
+        return Color(nsColor: color).opacity(opacity)
     }
 
     @ViewBuilder
@@ -887,14 +911,6 @@ private struct TerminalTabSidebarRow: View {
         Text(tab.keyEquivalent ?? "\(tab.index)")
             .font(.system(size: 11))
             .frame(width: 30, height: 30)
-            .overlay(alignment: .topTrailing) {
-                if let color = palette.color(for: tab.color) {
-                    Circle()
-                        .fill(Color(nsColor: color))
-                        .frame(width: 6, height: 6)
-                        .padding(3)
-                }
-            }
             .overlay(alignment: .bottomTrailing) {
                 statusBadge.padding(2)
             }
@@ -929,10 +945,6 @@ private struct TerminalTabSidebarRow: View {
                     TerminalTabSidebarButton(systemName: "xmark", label: "Close Tab", kind: .close) {
                         model.close(tab)
                     }
-                } else if let color = palette.color(for: tab.color) {
-                    Circle()
-                        .fill(Color(nsColor: color))
-                        .frame(width: 8, height: 8)
                 }
             }
             .frame(width: 22, height: 22)
@@ -983,7 +995,7 @@ private struct TerminalTabSidebarGroup: View {
             }
 
             ForEach(visibleTabs) { tab in
-                TerminalTabSidebarRow(model: model, tab: tab, isCompact: isCompact, isInGroup: true)
+                TerminalTabSidebarRow(model: model, tab: tab, isCompact: isCompact, groupColor: group.color)
             }
         }
         .frame(maxWidth: .infinity)
@@ -1070,7 +1082,7 @@ private struct TerminalTabSidebarGroup: View {
     /// Graphite (and no color) groups are drawn neutral: a gray name on a gray fill would be
     /// as hard to read as the captions this is meant to replace.
     private var isNeutral: Bool {
-        group.color == .graphite || palette.color(for: group.color) == nil
+        palette.isNeutral(group.color)
     }
 
     private var accentColor: Color {
@@ -1089,7 +1101,7 @@ private struct TerminalTabSidebarGroup: View {
     private var fillColor: Color {
         if isNeutral { return Color.primary.opacity(0.06) }
         // Yellow turns muddy at the opacity the other colors use.
-        return accentColor.opacity(group.color == .yellow ? 0.08 : 0.12)
+        return accentColor.opacity(group.color == .yellow || group.color == .brightYellow ? 0.08 : 0.12)
     }
 }
 
@@ -1160,7 +1172,17 @@ struct TerminalTabSidebarPalette {
         // Terminal palettes have no orange, so mix the theme's red and yellow.
         case .orange: return ansi[1].blended(withFraction: 0.5, of: ansi[3]) ?? ansi[1]
         case .graphite: return ansi[8]
+        case .brightRed: return ansi[9]
+        case .brightGreen: return ansi[10]
+        case .brightYellow: return ansi[11]
+        case .brightBlue: return ansi[12]
+        case .brightTeal: return ansi[14]
         }
+    }
+
+    /// Graphite and no color are drawn neutral rather than tinted.
+    func isNeutral(_ tabColor: TerminalTabColor) -> Bool {
+        tabColor == .graphite || color(for: tabColor) == nil
     }
 }
 

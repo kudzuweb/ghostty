@@ -262,6 +262,11 @@ extension TerminalTabColor {
         case "GTCg".fourCharCode: self = .green
         case "GTCt".fourCharCode: self = .teal
         case "GTCa".fourCharCode: self = .graphite
+        case "GTBr".fourCharCode: self = .brightRed
+        case "GTBg".fourCharCode: self = .brightGreen
+        case "GTBy".fourCharCode: self = .brightYellow
+        case "GTBb".fourCharCode: self = .brightBlue
+        case "GTBt".fourCharCode: self = .brightTeal
         default: return nil
         }
     }
@@ -278,6 +283,11 @@ extension TerminalTabColor {
         case .green: "GTCg".fourCharCode
         case .teal: "GTCt".fourCharCode
         case .graphite: "GTCa".fourCharCode
+        case .brightRed: "GTBr".fourCharCode
+        case .brightGreen: "GTBg".fourCharCode
+        case .brightYellow: "GTBy".fourCharCode
+        case .brightBlue: "GTBb".fourCharCode
+        case .brightTeal: "GTBt".fourCharCode
         }
     }
 }

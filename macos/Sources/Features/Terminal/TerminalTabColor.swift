@@ -12,6 +12,11 @@ enum TerminalTabColor: Int, CaseIterable, Codable {
     case green
     case teal
     case graphite
+    case brightRed
+    case brightGreen
+    case brightYellow
+    case brightBlue
+    case brightTeal
 
     var localizedName: String {
         switch self {
@@ -35,6 +40,16 @@ enum TerminalTabColor: Int, CaseIterable, Codable {
             return "Teal"
         case .graphite:
             return "Graphite"
+        case .brightRed:
+            return "Bright Red"
+        case .brightGreen:
+            return "Bright Green"
+        case .brightYellow:
+            return "Bright Yellow"
+        case .brightBlue:
+            return "Bright Blue"
+        case .brightTeal:
+            return "Bright Teal"
         }
     }
 
@@ -64,7 +79,23 @@ enum TerminalTabColor: Int, CaseIterable, Codable {
             }
         case .graphite:
             return .systemGray
+        case .brightRed:
+            return Self.brightened(.systemRed)
+        case .brightGreen:
+            return Self.brightened(.systemGreen)
+        case .brightYellow:
+            return Self.brightened(.systemYellow)
+        case .brightBlue:
+            return Self.brightened(.systemBlue)
+        case .brightTeal:
+            return Self.brightened(.systemTeal)
         }
+    }
+
+    /// The system color blended 35% toward white, the fallback for the bright colors
+    /// when no theme palette is in play.
+    private static func brightened(_ color: NSColor) -> NSColor {
+        color.blended(withFraction: 0.35, of: .white) ?? color
     }
 
     func swatchImage(selected: Bool) -> NSImage {
@@ -152,6 +183,7 @@ struct TabColorMenuView: View {
     static let paletteRows: [[TerminalTabColor]] = [
         [.none, .blue, .purple, .pink, .red],
         [.orange, .yellow, .green, .teal, .graphite],
+        [.brightRed, .brightYellow, .brightGreen, .brightTeal, .brightBlue],
     ]
 
     /// Leading padding to align with the menu's icon gutter.
