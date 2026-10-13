@@ -92,7 +92,7 @@ struct TerminalTabAgentDot: View {
             case .idle:
                 Circle().strokeBorder(Color.secondary, lineWidth: 1)
             case .working:
-                filled(Color.primary)
+                filled(palette.foreground ?? Color.primary)
                     .opacity(reduceMotion || !isDim ? 1 : 0.35)
                     .animation(
                         reduceMotion ? nil : .easeInOut(duration: 0.9).repeatForever(autoreverses: true),

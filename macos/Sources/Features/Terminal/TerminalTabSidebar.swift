@@ -553,7 +553,7 @@ struct TerminalTabSidebarLayout<Content: View>: View {
                     .frame(width: isCollapsed ? TerminalTabSidebar.collapsedWidth : width)
                     .background(ghostty.config.backgroundColor.opacity(ghostty.config.backgroundOpacity))
                     .environment(\.colorScheme, NSColor(ghostty.config.backgroundColor).isLightColor ? .light : .dark)
-                    .environment(\.terminalTabSidebarPalette, TerminalTabSidebarPalette(ansi: ghostty.config.ansiPalette, background: ghostty.config.backgroundColor))
+                    .environment(\.terminalTabSidebarPalette, TerminalTabSidebarPalette(ansi: ghostty.config.ansiPalette, background: ghostty.config.backgroundColor, foreground: ghostty.config.foregroundColor))
 
                 divider
             }
@@ -1248,9 +1248,17 @@ struct TerminalTabSidebarPalette {
     /// The terminal's background color, used to outline status dots.
     let background: Color
 
-    init(ansi: [Color] = [], background: Color = Color(nsColor: .windowBackgroundColor)) {
+    /// The terminal's text color, used for the working dot. Nil falls back to the system label color.
+    let foreground: Color?
+
+    init(
+        ansi: [Color] = [],
+        background: Color = Color(nsColor: .windowBackgroundColor),
+        foreground: Color? = nil
+    ) {
         self.ansi = ansi.map { NSColor($0).usingColorSpace(.sRGB) ?? NSColor($0) }
         self.background = background
+        self.foreground = foreground
     }
 
     /// The theme's red, yellow and green for status dots; the system colors without a theme.
