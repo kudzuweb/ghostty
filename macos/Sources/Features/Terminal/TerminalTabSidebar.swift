@@ -985,9 +985,7 @@ private struct TerminalTabSidebarRow: View {
             }
             .frame(width: 22, height: 22)
 
-            Text(tab.title)
-                .lineLimit(1)
-                .truncationMode(.tail)
+            TerminalTabSidebarScrollingTitle(text: tab.title, isHovering: isHovering)
             if model.tabs.filter({ $0.title == tab.title }).count > 1, let id = tab.surfaceID {
                 Text(String(id.uuidString.prefix(6)).lowercased())
                     .font(.system(size: 10, design: .monospaced))
@@ -1008,6 +1006,96 @@ private struct TerminalTabSidebarRow: View {
         .padding(.leading, 6)
         .padding(.trailing, 10)
         .frame(height: 32)
+    }
+}
+
+/// A row's title. It truncates at the tail until the pointer rests on a row whose title is
+/// wider than the room it has; then, after half a second, the title scrolls left at 30pt/s
+/// until its end shows and holds there. When the pointer leaves, it snaps back to the start
+/// and truncates again. A title that fits never moves, and Reduce Motion turns scrolling
+/// off (the row's tooltip still carries the full title). The scrolling text is clipped to
+/// the title's own frame, so it never slides under the status slot or the key equivalent.
+private struct TerminalTabSidebarScrollingTitle: View {
+    let text: String
+    let isHovering: Bool
+
+    private static let pointsPerSecond: CGFloat = 30
+    private static let startDelay: Duration = .milliseconds(500)
+
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    /// The title's width on one line with nothing truncated.
+    @State private var idealWidth: CGFloat = 0
+    /// The width the row gives the title.
+    @State private var frameWidth: CGFloat = 0
+    @State private var offset: CGFloat = 0
+    @State private var isScrolling = false
+
+    private var overflow: CGFloat { max(0, idealWidth - frameWidth) }
+    private var shouldScroll: Bool { isHovering && !reduceMotion && overflow > 1 }
+
+    var body: some View {
+        Text(text)
+            .lineLimit(1)
+            .truncationMode(.tail)
+            .opacity(isScrolling ? 0 : 1)
+            .background(
+                GeometryReader { proxy in
+                    Color.clear.preference(key: FrameWidthKey.self, value: proxy.size.width)
+                }
+            )
+            .background(
+                Text(text)
+                    .fixedSize()
+                    .hidden()
+                    .background(
+                        GeometryReader { proxy in
+                            Color.clear.preference(key: IdealWidthKey.self, value: proxy.size.width)
+                        }
+                    )
+            )
+            .onPreferenceChange(FrameWidthKey.self) { frameWidth = $0 }
+            .onPreferenceChange(IdealWidthKey.self) { idealWidth = $0 }
+            .overlay(alignment: .leading) {
+                if isScrolling {
+                    Text(text)
+                        .lineLimit(1)
+                        .fixedSize()
+                        .offset(x: -offset)
+                }
+            }
+            .clipped()
+            .task(id: ScrollState(shouldScroll: shouldScroll, overflow: overflow)) {
+                guard shouldScroll else {
+                    var transaction = Transaction(animation: nil)
+                    transaction.disablesAnimations = true
+                    withTransaction(transaction) {
+                        offset = 0
+                        isScrolling = false
+                    }
+                    return
+                }
+                try? await Task.sleep(for: Self.startDelay)
+                guard !Task.isCancelled else { return }
+                isScrolling = true
+                withAnimation(.linear(duration: Double(overflow / Self.pointsPerSecond))) {
+                    offset = overflow
+                }
+            }
+    }
+
+    private struct ScrollState: Equatable {
+        let shouldScroll: Bool
+        let overflow: CGFloat
+    }
+
+    private struct FrameWidthKey: PreferenceKey {
+        static let defaultValue: CGFloat = 0
+        static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) { value = nextValue() }
+    }
+
+    private struct IdealWidthKey: PreferenceKey {
+        static let defaultValue: CGFloat = 0
+        static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) { value = nextValue() }
     }
 }
 
