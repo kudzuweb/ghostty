@@ -176,6 +176,15 @@ The check reports a new upstream minor or major release and never downloads or i
 | Names removed | Explicit Claude/Codex process identity and transport keys (`CLAUDECODE`, session/parent/process IDs, entrypoint/SSE port, Codex session/thread/sandbox/pipe/originator identity keys) and `CODEX_MANAGED_*`. The exact set is `Ghostty.agentEnvironmentNames`. Configuration/auth values such as `CLAUDE_CODE_USE_BEDROCK`, `ANTHROPIC_*`, function-hook enablement and `CODEX_HOME` survive. |
 | Why settings-derived variables go too | Only identity/transport keys are removed; provider/authentication/configuration variables remain available to sessions launched in tabs. |
 
+### Agent status (OSC 7501)
+
+| Item | Detail |
+|---|---|
+| What it does | Claude Code and Codex report their state with `ESC ] 7501 ; <payload> ST`. The core parses it (`src/terminal/osc/parsers/program_status.zig`) and `src/termio/stream_handler.zig` answers a payload starting with `?` with `ESC ] 7501 ; ? ESC \` on the pty. Every other payload up to 2048 bytes reaches the apprt unparsed as the `program_status` action (`GHOSTTY_ACTION_PROGRAM_STATUS`, appended last to the action enums in `src/apprt/action.zig` and `include/ghostty.h`). GTK ignores it. |
+| Why the query reply matters | Claude Code sends the query at startup and reports statuses only when the terminal answers it; Codex sends statuses unconditionally. The reply was verified on 2026-10-13 by running a probe as the isolated test app's command: it sent the query and read back exactly `ESC ] 7501 ; ? ESC \`. |
+| Where statuses land | `Ghostty.App.swift` parses each payload with `Ghostty.AgentStatus.parse` and sets `SurfaceView.agentStatus` on the main thread: a state sets it, `state=clear` sets it to nil, and queries, per-task lines and unknown payloads leave it alone. A change posts `terminalTabsDidChange` so the sidebar redraws. The child process exiting also clears it, because a crashed agent sends no `clear`. |
+| Payloads seen | Claude Code 2.1.296 sends `state=idle`, `state=working`, `state=done`, `state=blocked` with `kind=permission` and a base64 `msg`, and `state=clear`, each with `app=claude-code` (checked live on 2026-10-13). |
+
 ### Backports from upstream
 
 Each is in upstream's development branch and will arrive in a later release, where a merge may show them as already applied. The first three came in so the foreground process id and tty could exist; the last fixes non-ASCII text in `initial input`.
@@ -234,6 +243,7 @@ Both launchers address `/Applications/Ghostty.app` by absolute path.
 | `src/config/Config.zig` | The fork's config keys live in one marked block before the `_arena` field, plus the `SleepGuardMode` and `KeepAliveBackground` enums and the `TimeOfDay` struct next to `MacTitlebarStyle`. Keep all of them when merging. |
 | `include/ghostty.h` | Upstream renamed every C API declaration with a `GHOSTTY_API` prefix after 1.3, so backports touching it conflict. Keep the release's style and add the new declarations. |
 | `src/pty.zig`, `src/build/SharedDeps.zig` and `src/termio/` | These hold the backported process-info code and may already be applied upstream. |
+| `src/apprt/action.zig` and `include/ghostty.h` | The fork appends `program_status` to the end of the action enums, and `ghostty.h`'s `ghostty_action_tag_e` must keep the same order as `Action.Key`. When upstream adds actions, keep the fork's entry last in both; the `ghostty.h Action.Key` test catches a mismatch. |
 | `macos/Ghostty.sdef` | The fork adds properties here, and `macos/AGENTS.md` fixes the order of top-level definitions: classes, records, enums, commands. |
 
 ### Gotchas
