@@ -1432,6 +1432,9 @@ extension Ghostty {
                 // Keep alive tells a deliberate exit from a crash by the exit status.
                 let finishedID = surfaceView.id
                 MainActor.assumeIsolated {
+                    // The shell is back at its prompt, so any agent that ran in it has exited.
+                    // An agent that crashed never sent `clear`, so its status would otherwise stay.
+                    surfaceView.agentStatus = nil
                     KeepAlive.shared.commandFinished(in: finishedID, exitCode: v.exit_code)
                     AgentSessionRecovery.shared.commandFinished(surfaceID: finishedID, exitCode: v.exit_code)
                 }
