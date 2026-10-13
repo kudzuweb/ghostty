@@ -318,6 +318,7 @@ pub const StreamHandler = struct {
             .report_pwd => try self.reportPwd(value.url),
             .show_desktop_notification => try self.showDesktopNotification(value.title, value.body),
             .progress_report => self.progressReport(value),
+            .program_status => self.programStatus(value.payload),
             .start_hyperlink => try self.startHyperlink(value.uri, value.id),
             .clipboard_contents => try self.clipboardContents(value.kind, value.data),
             .semantic_prompt => try self.semanticPrompt(value),
@@ -1547,5 +1548,31 @@ pub const StreamHandler = struct {
     /// Display a GUI progress report.
     fn progressReport(self: *StreamHandler, report: terminal.osc.Command.ProgressReport) void {
         self.surfaceMessageWriter(.{ .progress_report = report });
+    }
+
+    /// OSC 7501 payloads longer than this are dropped whole, because a
+    /// payload cut mid-field could parse as a different status.
+    const program_status_max_len = 2048;
+
+    /// OSC 7501. A payload starting with `?` is a capability query, which
+    /// we answer on the pty; Claude Code only sends statuses after seeing
+    /// the reply. Any other payload goes to the apprt unparsed.
+    fn programStatus(self: *StreamHandler, payload: []const u8) void {
+        if (payload.len > 0 and payload[0] == '?') {
+            self.messageWriter(.{ .write_stable = "\x1b]7501;?\x1b\\" });
+            return;
+        }
+
+        if (payload.len > program_status_max_len) {
+            log.warn("OSC 7501 payload too long, ignoring len={}", .{payload.len});
+            return;
+        }
+
+        // If creating our write request fails then we just ignore it.
+        if (apprt.surface.Message.WriteReq.init(self.alloc, payload)) |req| {
+            self.surfaceMessageWriter(.{ .program_status = req });
+        } else |err| {
+            log.warn("error notifying surface of program status err={}", .{err});
+        }
     }
 };

@@ -160,6 +160,14 @@ pub const Command = union(Key) {
     /// https://uapi-group.org/specifications/specs/osc_context/
     context_signal: parsers.context_signal.Command,
 
+    /// OSC 7501. Status reports from coding agents (Claude Code, Codex).
+    /// The payload is either a capability query (`?`) or colon-separated
+    /// `key=value` fields such as `state=working:app=claude-code`. It is
+    /// passed through unparsed.
+    program_status: struct {
+        payload: [:0]const u8,
+    },
+
     pub const SemanticPrompt = parsers.semantic_prompt.Command;
 
     pub const KittyClipboardProtocol = parsers.kitty_clipboard_protocol.OSC;
@@ -193,6 +201,7 @@ pub const Command = union(Key) {
             "kitty_text_sizing",
             "kitty_clipboard_protocol",
             "context_signal",
+            "program_status",
         },
     );
 
@@ -345,6 +354,7 @@ pub const Parser = struct {
         @"52",
         @"55",
         @"66",
+        @"75",
         @"77",
         @"104",
         @"110",
@@ -359,9 +369,11 @@ pub const Parser = struct {
         @"119",
         @"133",
         @"552",
+        @"750",
         @"777",
         @"1337",
         @"5522",
+        @"7501",
     };
 
     pub fn init(alloc: ?Allocator) Parser {
@@ -425,6 +437,7 @@ pub const Parser = struct {
             .kitty_text_sizing,
             .kitty_clipboard_protocol,
             .context_signal,
+            .program_status,
             => {},
         }
 
@@ -636,7 +649,23 @@ pub const Parser = struct {
 
             .@"7" => switch (c) {
                 ';' => self.writeToFixed(),
+                '5' => self.state = .@"75",
                 '7' => self.state = .@"77",
+                else => self.state = .invalid,
+            },
+
+            .@"75" => switch (c) {
+                '0' => self.state = .@"750",
+                else => self.state = .invalid,
+            },
+
+            .@"750" => switch (c) {
+                '1' => self.state = .@"7501",
+                else => self.state = .invalid,
+            },
+
+            .@"7501" => switch (c) {
+                ';' => self.writeToFixed(),
                 else => self.state = .invalid,
             },
 
@@ -749,6 +778,12 @@ pub const Parser = struct {
             .@"6" => null,
 
             .@"66" => parsers.kitty_text_sizing.parse(self, terminator_ch),
+
+            .@"75",
+            .@"750",
+            => null,
+
+            .@"7501" => parsers.program_status.parse(self, terminator_ch),
 
             .@"77" => null,
 

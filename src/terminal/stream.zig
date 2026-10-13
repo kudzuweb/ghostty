@@ -126,6 +126,7 @@ pub const Action = union(Key) {
     kitty_color_report: kitty.color.OSC,
     color_operation: ColorOperation,
     semantic_prompt: SemanticPrompt,
+    program_status: ProgramStatus,
 
     pub const Key = lib.Enum(
         lib_target,
@@ -223,6 +224,7 @@ pub const Action = union(Key) {
             "kitty_color_report",
             "color_operation",
             "semantic_prompt",
+            "program_status",
         },
     );
 
@@ -329,6 +331,16 @@ pub const Action = union(Key) {
 
         pub fn cval(self: ReportPwd) ReportPwd.C {
             return .init(self.url);
+        }
+    };
+
+    pub const ProgramStatus = struct {
+        payload: []const u8,
+
+        pub const C = lib.String;
+
+        pub fn cval(self: ProgramStatus) ProgramStatus.C {
+            return .init(self.payload);
         }
     };
 
@@ -2043,6 +2055,10 @@ pub fn Stream(comptime Handler: type) type {
                     try self.handler.vt(.progress_report, v);
                 },
 
+                .program_status => |v| {
+                    try self.handler.vt(.program_status, .{ .payload = v.payload });
+                },
+
                 .conemu_sleep,
                 .conemu_show_message_box,
                 .conemu_change_tab_title,
@@ -2939,6 +2955,57 @@ test "stream: change window title with invalid utf-8" {
         var s: Stream(H) = .init(.{});
         try s.nextSlice("\x1b]2;abc\xc0\x1b\\");
         try testing.expect(!s.handler.seen);
+    }
+}
+
+test "stream: OSC 7501 program status" {
+    const H = struct {
+        buf: [64]u8 = undefined,
+        len: usize = 0,
+        count: usize = 0,
+
+        pub fn vt(
+            self: *@This(),
+            comptime action: anytype,
+            value: anytype,
+        ) !void {
+            switch (action) {
+                .program_status => {
+                    @memcpy(self.buf[0..value.payload.len], value.payload);
+                    self.len = value.payload.len;
+                    self.count += 1;
+                },
+                else => {},
+            }
+        }
+
+        fn payload(self: *const @This()) []const u8 {
+            return self.buf[0..self.len];
+        }
+    };
+
+    // ST terminator
+    {
+        var s: Stream(H) = .init(.{});
+        try s.nextSlice("\x1b]7501;?\x1b\\");
+        try testing.expectEqual(1, s.handler.count);
+        try testing.expectEqualStrings("?", s.handler.payload());
+    }
+
+    // BEL terminator
+    {
+        var s: Stream(H) = .init(.{});
+        try s.nextSlice("\x1b]7501;state=working:app=claude-code\x07");
+        try testing.expectEqual(1, s.handler.count);
+        try testing.expectEqualStrings("state=working:app=claude-code", s.handler.payload());
+    }
+
+    // Empty payload
+    {
+        var s: Stream(H) = .init(.{});
+        try s.nextSlice("\x1b]7501;\x1b\\");
+        try testing.expectEqual(1, s.handler.count);
+        try testing.expectEqualStrings("", s.handler.payload());
     }
 }
 
