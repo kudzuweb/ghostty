@@ -29,6 +29,9 @@ final class TerminalTabSidebarModel: ObservableObject {
 
         /// Whether keep alive watches the tab, and whether it gave up on it.
         let keepAlive: KeepAliveTabState
+
+        /// What the agents in the tab's terminals are doing, or nil when none runs one.
+        let agentStatus: TerminalTabAgentIndicator?
     }
 
     /// A named tab group, drawn as one container holding its tabs.
@@ -137,6 +140,11 @@ final class TerminalTabSidebarModel: ObservableObject {
         let config = (window?.windowController as? BaseTerminalController)?.ghostty.config
         let newTabs = tabWindows.enumerated().map { offset, tabWindow in
             let index = offset + 1
+            let surfaces = ((tabWindow.windowController as? BaseTerminalController).map { Array($0.surfaceTree) }) ?? []
+            // Our window is only on screen while it is the selected tab, but every tab's
+            // window has a model, so ask the tab group which one is really selected.
+            let isShown = (tabWindow.tabGroup?.selectedWindow ?? tabWindow) === tabWindow
+            if isShown { markFinishedAgentsSeen(in: surfaces) }
             let shortcut = index <= 9 ? config?.keyboardShortcut(for: "goto_tab:\(index)") : nil
             return Tab(
                 id: ObjectIdentifier(tabWindow),
@@ -148,7 +156,11 @@ final class TerminalTabSidebarModel: ObservableObject {
                 // Our window is only on screen while it is the selected tab.
                 isSelected: tabWindow === window,
                 group: (tabWindow as? TerminalWindow)?.tabGroupName,
-                keepAlive: (tabWindow as? TerminalWindow)?.keepAliveState ?? .off
+                keepAlive: (tabWindow as? TerminalWindow)?.keepAliveState ?? .off,
+                agentStatus: TerminalTabAgentIndicator.aggregate(
+                    surfaces.map { ($0.agentStatus, KeepAlive.shared.apiErrorSurfaces.contains($0.id)) },
+                    isSelected: isShown
+                )
             )
         }
 
@@ -156,6 +168,16 @@ final class TerminalTabSidebarModel: ObservableObject {
         guard newTabs != tabs || newSections != sections else { return }
         tabs = newTabs
         sections = newSections
+    }
+
+    /// A tab that has been looked at no longer counts as finished: its `done` agents go
+    /// back to `idle`, so the dot turns green again only for the next finished turn.
+    private func markFinishedAgentsSeen(in surfaces: [Ghostty.SurfaceView]) {
+        for surface in surfaces {
+            if let status = surface.agentStatus, status.state == .done {
+                surface.agentStatus = status.with(state: .idle)
+            }
+        }
     }
 
     /// Lists each group once, where its first tab is. Moving a tab into a group places it
@@ -531,7 +553,7 @@ struct TerminalTabSidebarLayout<Content: View>: View {
                     .frame(width: isCollapsed ? TerminalTabSidebar.collapsedWidth : width)
                     .background(ghostty.config.backgroundColor.opacity(ghostty.config.backgroundOpacity))
                     .environment(\.colorScheme, NSColor(ghostty.config.backgroundColor).isLightColor ? .light : .dark)
-                    .environment(\.terminalTabSidebarPalette, TerminalTabSidebarPalette(ansi: ghostty.config.ansiPalette))
+                    .environment(\.terminalTabSidebarPalette, TerminalTabSidebarPalette(ansi: ghostty.config.ansiPalette, background: ghostty.config.backgroundColor))
 
                 divider
             }
@@ -635,6 +657,9 @@ struct TerminalTabSidebar: View {
                 ScrollView {
                     LazyVStack(spacing: 0) {
                         sectionList(isCompact: false)
+                        if !keepAlive.backgroundSessions.isEmpty {
+                            TerminalTabSidebarBackgroundSessions(sessions: keepAlive.backgroundSessions)
+                        }
                     }
                     .padding(.bottom, 6)
                 }
@@ -837,10 +862,10 @@ private struct TerminalTabSidebarRow: View {
             .contentShape(Rectangle())
             .onTapGesture { model.select(tab) }
             .onHover { isHovering = $0 }
-            .help([model.displayTitle(tab), attentionMessage].compactMap { $0 }.joined(separator: "\n"))
+            .help([model.displayTitle(tab), tab.agentStatus?.description, attentionMessage].compactMap { $0 }.joined(separator: "\n"))
             .overlay(TerminalTabSidebarMenuArea(dropTarget: { model.dropTarget(for: tab) }, menu: { model.contextMenu(for: tab) }))
             .accessibilityElement(children: .combine)
-            .accessibilityLabel(model.displayTitle(tab))
+            .accessibilityLabel([model.displayTitle(tab), tab.agentStatus?.description].compactMap { $0 }.joined(separator: ", "))
             .accessibilityAddTraits(tab.isSelected ? [.isButton, .isSelected] : .isButton)
             .accessibilityAction { model.select(tab) }
     }
@@ -911,6 +936,13 @@ private struct TerminalTabSidebarRow: View {
         Text(tab.keyEquivalent ?? "\(tab.index)")
             .font(.system(size: 11))
             .frame(width: 30, height: 30)
+            .overlay(alignment: .topTrailing) {
+                if let status = tab.agentStatus {
+                    TerminalTabAgentDot(kind: status.kind, size: 6)
+                        .padding(3)
+                        .help(status.description)
+                }
+            }
             .overlay(alignment: .bottomTrailing) {
                 statusBadge.padding(2)
             }
@@ -945,6 +977,9 @@ private struct TerminalTabSidebarRow: View {
                     TerminalTabSidebarButton(systemName: "xmark", label: "Close Tab", kind: .close) {
                         model.close(tab)
                     }
+                } else if let status = tab.agentStatus {
+                    TerminalTabAgentDot(kind: status.kind)
+                        .help(status.description)
                 }
             }
             .frame(width: 22, height: 22)
@@ -1105,6 +1140,62 @@ private struct TerminalTabSidebarGroup: View {
     }
 }
 
+/// The background Claude Code sessions that are running, queued, blocked or failed, as one
+/// block below the tabs. It is informational: its rows do nothing when clicked.
+private struct TerminalTabSidebarBackgroundSessions: View {
+    let sessions: [KeepAliveBackgroundSession]
+
+    var body: some View {
+        VStack(spacing: 0) {
+            Text("Background")
+                .font(.system(size: 13, weight: .semibold))
+                .foregroundStyle(Color.primary.opacity(0.9))
+                .lineLimit(1)
+                .padding(.leading, 10)
+                .padding(.trailing, 10)
+                .frame(maxWidth: .infinity, minHeight: 30, alignment: .leading)
+
+            ForEach(sessions, id: \.id) { session in
+                row(session)
+            }
+        }
+        .frame(maxWidth: .infinity)
+        .background(Rectangle().fill(Color.primary.opacity(0.06)))
+    }
+
+    private func row(_ session: KeepAliveBackgroundSession) -> some View {
+        let name = session.name.isEmpty ? String(session.id.prefix(8)) : session.name
+        let kind = Self.dotKind(for: session.state)
+        return HStack(spacing: 4) {
+            TerminalTabAgentDot(kind: kind)
+                .frame(width: 22, height: 22)
+            Text(name)
+                .lineLimit(1)
+                .truncationMode(.tail)
+            Spacer(minLength: 4)
+        }
+        .font(.system(size: 13))
+        .foregroundStyle(Color.primary.opacity(0.75))
+        .padding(.leading, 6)
+        .padding(.trailing, 10)
+        .frame(height: 28)
+        .contentShape(Rectangle())
+        .help("\(name)\nState: \(session.state)\nID: \(session.id)")
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel("Background session \(name), \(session.state)")
+    }
+
+    /// The dot a background session's state is drawn with.
+    static func dotKind(for state: String) -> TerminalTabAgentIndicator.Kind {
+        switch state {
+        case "running": .working
+        case "blocked": .blocked
+        case "failed": .error
+        default: .idle
+        }
+    }
+}
+
 /// Shows an AppKit menu when its area is right-clicked or control-clicked, and lets every
 /// other mouse event through to the SwiftUI views beneath it.
 private struct TerminalTabSidebarMenuArea: NSViewRepresentable {
@@ -1154,8 +1245,22 @@ private struct TerminalTabSidebarMenuArea: NSViewRepresentable {
 struct TerminalTabSidebarPalette {
     private let ansi: [NSColor]
 
-    init(ansi: [Color] = []) {
+    /// The terminal's background color, used to outline status dots.
+    let background: Color
+
+    init(ansi: [Color] = [], background: Color = Color(nsColor: .windowBackgroundColor)) {
         self.ansi = ansi.map { NSColor($0).usingColorSpace(.sRGB) ?? NSColor($0) }
+        self.background = background
+    }
+
+    /// The theme's red, yellow and green for status dots; the system colors without a theme.
+    func statusColor(_ kind: TerminalTabAgentIndicator.Kind) -> Color {
+        let (index, fallback): (Int, NSColor) = switch kind {
+        case .error: (1, .systemRed)
+        case .blocked: (3, .systemYellow)
+        default: (2, .systemGreen)
+        }
+        return Color(nsColor: ansi.count >= 16 ? ansi[index] : fallback)
     }
 
     func color(for tabColor: TerminalTabColor) -> NSColor? {

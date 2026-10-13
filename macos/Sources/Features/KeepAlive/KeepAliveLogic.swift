@@ -219,6 +219,33 @@ enum KeepAliveAgents {
     static func respawnTargets(_ sessions: [KeepAliveBackgroundSession]) -> [KeepAliveBackgroundSession] {
         sessions.filter { $0.state == "failed" }
     }
+
+    /// The background sessions the sidebar lists: those running, queued, blocked or failed,
+    /// blocked first, then failed, running and queued, each group by name. `done`, `stopped`
+    /// and any state this app doesn't know are left out.
+    static func sidebarSessions(_ sessions: [KeepAliveBackgroundSession]) -> [KeepAliveBackgroundSession] {
+        let order = ["blocked", "failed", "running", "queued"]
+        return sessions
+            .filter { order.contains($0.state) }
+            .sorted { lhs, rhs in
+                let (l, r) = (order.firstIndex(of: lhs.state) ?? 0, order.firstIndex(of: rhs.state) ?? 0)
+                if l != r { return l < r }
+                let byName = lhs.name.localizedCaseInsensitiveCompare(rhs.name)
+                return byName == .orderedSame ? lhs.id < rhs.id : byName == .orderedAscending
+            }
+    }
+
+    /// The blocked sessions that haven't been announced yet, and the ids to remember as
+    /// announced afterwards. An id leaves the set once it is no longer blocked, so it is
+    /// announced again if it blocks again.
+    static func newlyBlocked(
+        in sessions: [KeepAliveBackgroundSession],
+        alreadyNotified: Set<String>
+    ) -> (toAnnounce: [KeepAliveBackgroundSession], notified: Set<String>) {
+        let blocked = sessions.filter { $0.state == "blocked" }
+        let ids = Set(blocked.map(\.id))
+        return (blocked.filter { !alreadyNotified.contains($0.id) }, ids)
+    }
 }
 
 /// Visible prompt transport state, projected from the actual mailbox lifecycle.

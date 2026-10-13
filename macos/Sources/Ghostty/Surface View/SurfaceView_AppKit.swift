@@ -65,6 +65,9 @@ extension Ghostty {
             }
         }
 
+        /// What the coding agent running in this terminal last reported about itself (OSC 7501).
+        @Published var agentStatus: Ghostty.AgentStatus?
+
         // The currently active key sequence. The sequence is not active if this is empty.
         @Published var keySequence: [KeyboardShortcut] = []
 

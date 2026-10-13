@@ -69,6 +69,17 @@ final class KeepAlive: ObservableObject {
 
     @Published private(set) var promptStatuses: [UUID: KeepAlivePromptStatus] = [:]
 
+    /// The terminals whose Claude Code session is stopped on an API error, among the kept-alive
+    /// tabs. The sidebar shows these as an error dot. A terminal in a tab that keep alive does
+    /// not watch is never listed.
+    @Published private(set) var apiErrorSurfaces: Set<UUID> = []
+
+    /// The background sessions the sidebar lists, as the last `claude agents` call reported them.
+    @Published private(set) var backgroundSessions: [KeepAliveBackgroundSession] = []
+
+    /// The ids of the blocked background sessions already announced.
+    private var announcedBlocked: Set<String> = []
+
     private struct RunningSession {
         let tool: AgentTool
         let id: String
@@ -375,9 +386,10 @@ final class KeepAlive: ObservableObject {
         refreshOvernight()
         guard !ticking else { return }
         let tabs = keptAliveTabs()
-        let wantsBackground = Ghostty.isDailyForkProfile && settings.background == .failed
-        guard !tabs.isEmpty || wantsBackground else {
+        // The sidebar lists background sessions, so the daily fork asks even with no kept-alive tab.
+        guard !tabs.isEmpty || Ghostty.isDailyForkProfile else {
             surfaceStates.removeAll()
+            syncApiErrorSurfaces()
             return
         }
         tickEvidence = Dictionary(uniqueKeysWithValues: tabs.flatMap { tab in
@@ -395,6 +407,7 @@ final class KeepAlive: ObservableObject {
             let context = await cutoffContext(for: keptAliveTabs())
             guard !Task.isCancelled, !shuttingDown, generation == configurationGeneration else { return }
             process(keptAliveTabs(), snapshot: snapshot, cutoff: context)
+            if let snapshot { updateBackgroundSessions(snapshot.background) }
             if Ghostty.isDailyForkProfile, settings.background == .failed, let snapshot, !(await respawnHeld()) {
                 guard !Task.isCancelled, !shuttingDown, generation == configurationGeneration,
                       Ghostty.isDailyForkProfile, settings.background == .failed else { return }
@@ -508,6 +521,7 @@ final class KeepAlive: ObservableObject {
         surfaceStates = surfaceStates.filter { live.contains($0.key) }
         promptStatuses = promptStatuses.filter { live.contains($0.key) }
         exitStatuses = exitStatuses.filter { live.contains($0.key) }
+        defer { syncApiErrorSurfaces() }
 
         for tab in tabs {
             for surface in tab.surfaces {
@@ -658,6 +672,29 @@ final class KeepAlive: ObservableObject {
                AgentSessionResume.isAlive(session.processIdentity) {
                 kill(currentPID, SIGTERM)
             }
+        }
+    }
+
+    // MARK: Sidebar state
+
+    /// Mirrors the surfaces that have an API error being handled. It runs wherever
+    /// `surfaceStates` is pruned or cleared, so the set never holds a closed surface.
+    private func syncApiErrorSurfaces() {
+        let errored = Set(surfaceStates.filter { $0.value.errorUUID != nil }.keys)
+        guard errored != apiErrorSurfaces else { return }
+        apiErrorSurfaces = errored
+        NotificationCenter.default.post(name: .terminalTabsDidChange, object: nil)
+    }
+
+    private func updateBackgroundSessions(_ sessions: [KeepAliveBackgroundSession]) {
+        let listed = KeepAliveAgents.sidebarSessions(sessions)
+        if listed != backgroundSessions { backgroundSessions = listed }
+
+        let (toAnnounce, notified) = KeepAliveAgents.newlyBlocked(in: sessions, alreadyNotified: announcedBlocked)
+        announcedBlocked = notified
+        for session in toAnnounce {
+            notifyKeepAlive(title: "Background session needs you",
+                            body: session.name.isEmpty ? session.id : session.name)
         }
     }
 
