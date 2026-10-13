@@ -65,8 +65,15 @@ extension Ghostty {
             }
         }
 
-        /// What the coding agent running in this terminal last reported about itself (OSC 7501).
-        @Published var agentStatus: Ghostty.AgentStatus?
+        // What a coding agent in this surface last reported through OSC 7501. Nil when no
+        // agent has reported, the agent sent `clear`, or the child process exited.
+        @Published var agentStatus: Ghostty.AgentStatus? {
+            didSet {
+                // The tab sidebar draws a dot from this, so it refreshes on every change.
+                guard agentStatus != oldValue else { return }
+                NotificationCenter.default.post(name: .terminalTabsDidChange, object: nil)
+            }
+        }
 
         // The currently active key sequence. The sequence is not active if this is empty.
         @Published var keySequence: [KeyboardShortcut] = []
