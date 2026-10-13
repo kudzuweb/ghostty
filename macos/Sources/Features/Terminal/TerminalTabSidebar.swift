@@ -657,9 +657,10 @@ struct TerminalTabSidebar: View {
                 ScrollView {
                     LazyVStack(spacing: 0) {
                         sectionList(isCompact: false)
-                        if !keepAlive.backgroundSessions.isEmpty {
-                            TerminalTabSidebarBackgroundSessions(sessions: keepAlive.backgroundSessions)
-                        }
+                        // Background sessions list: built but disabled by Mauria's choice (2026-10-13); uncomment to enable. See FORK.md.
+                        // if !keepAlive.backgroundSessions.isEmpty {
+                        //     TerminalTabSidebarBackgroundSessions(sessions: keepAlive.backgroundSessions)
+                        // }
                     }
                     .padding(.bottom, 6)
                 }

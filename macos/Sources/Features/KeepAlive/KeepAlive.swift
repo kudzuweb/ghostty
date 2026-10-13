@@ -386,8 +386,11 @@ final class KeepAlive: ObservableObject {
         refreshOvernight()
         guard !ticking else { return }
         let tabs = keptAliveTabs()
-        // The sidebar lists background sessions, so the daily fork asks even with no kept-alive tab.
-        guard !tabs.isEmpty || Ghostty.isDailyForkProfile else {
+        let wantsBackground = Ghostty.isDailyForkProfile && settings.background == .failed
+        // Background sessions list: built but disabled by Mauria's choice (2026-10-13); uncomment to enable. See FORK.md.
+        // The sidebar lists background sessions, so the daily fork asks even with no kept-alive tab:
+        // guard !tabs.isEmpty || Ghostty.isDailyForkProfile else {
+        guard !tabs.isEmpty || wantsBackground else {
             surfaceStates.removeAll()
             syncApiErrorSurfaces()
             return
@@ -692,10 +695,12 @@ final class KeepAlive: ObservableObject {
 
         let (toAnnounce, notified) = KeepAliveAgents.newlyBlocked(in: sessions, alreadyNotified: announcedBlocked)
         announcedBlocked = notified
-        for session in toAnnounce {
-            notifyKeepAlive(title: "Background session needs you",
-                            body: session.name.isEmpty ? session.id : session.name)
-        }
+        _ = toAnnounce
+        // Background sessions list: built but disabled by Mauria's choice (2026-10-13); uncomment to enable. See FORK.md.
+        // for session in toAnnounce {
+        //     notifyKeepAlive(title: "Background session needs you",
+        //                     body: session.name.isEmpty ? session.id : session.name)
+        // }
     }
 
     // MARK: API errors

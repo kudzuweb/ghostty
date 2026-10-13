@@ -42,28 +42,54 @@ struct TerminalTabAgentIndicatorTests {
         #expect(question?.description == "Agent has a question: Which one?")
     }
 
+    private func session(_ id: String, _ name: String, _ state: String, pid: Int? = 100) -> KeepAliveBackgroundSession {
+        .init(id: id, name: name, state: state, pid: pid)
+    }
+
     @Test func backgroundSessionsAreFilteredAndSorted() {
-        func session(_ id: String, _ name: String, _ state: String) -> KeepAliveBackgroundSession {
-            .init(id: id, name: name, state: state)
-        }
         let listed = KeepAliveAgents.sidebarSessions([
             session("1", "zeta", "running"), session("2", "alpha", "queued"), session("3", "done-one", "done"),
             session("4", "beta", "failed"), session("5", "gamma", "blocked"), session("6", "stopped-one", "stopped"),
             session("7", "mystery", "hibernating"), session("8", "alpha", "running"),
         ])
-        #expect(listed.map(\.id) == ["5", "4", "8", "1", "2"])
+        #expect(listed.map(\.id) == ["5", "4", "8", "1", "2", "3", "6"])
+    }
+
+    @Test func backgroundSessionsWithoutAProcessAreLeftOutExceptFailed() {
+        let listed = KeepAliveAgents.sidebarSessions([
+            session("1", "dead-blocked", "blocked", pid: nil), session("2", "dead-running", "running", pid: nil),
+            session("3", "dead-done", "done", pid: nil), session("4", "dead-stopped", "stopped", pid: nil),
+            session("5", "dead-failed", "failed", pid: nil), session("6", "live-done", "done"),
+        ])
+        #expect(listed.map(\.id) == ["5", "6"])
+    }
+
+    @Test func parseReadsTheProcessId() throws {
+        let json = """
+        [{"kind":"background","id":"a","name":"live","state":"running","pid":42},
+         {"kind":"background","id":"b","name":"dead","state":"blocked","pid":null}]
+        """
+        let snapshot = try #require(KeepAliveAgents.parse(Data(json.utf8)))
+        #expect(snapshot.background.map(\.pid) == [42, nil])
     }
 
     @Test func blockedSessionsAreAnnouncedOncePerBlock() {
-        let blocked = KeepAliveBackgroundSession(id: "a", name: "one", state: "blocked")
+        let blocked = session("a", "one", "blocked")
         var result = KeepAliveAgents.newlyBlocked(in: [blocked], alreadyNotified: [])
         #expect(result.toAnnounce.map(\.id) == ["a"])
         result = KeepAliveAgents.newlyBlocked(in: [blocked], alreadyNotified: result.notified)
         #expect(result.toAnnounce.isEmpty)
-        let running = KeepAliveBackgroundSession(id: "a", name: "one", state: "running")
+        let running = session("a", "one", "running")
         result = KeepAliveAgents.newlyBlocked(in: [running], alreadyNotified: result.notified)
         #expect(result.notified.isEmpty)
         result = KeepAliveAgents.newlyBlocked(in: [blocked], alreadyNotified: result.notified)
         #expect(result.toAnnounce.map(\.id) == ["a"])
+    }
+
+    @Test func aBlockedSessionWithoutAProcessIsNotAnnounced() {
+        let dead = session("a", "one", "blocked", pid: nil)
+        let result = KeepAliveAgents.newlyBlocked(in: [dead], alreadyNotified: [])
+        #expect(result.toAnnounce.isEmpty)
+        #expect(result.notified.isEmpty)
     }
 }
