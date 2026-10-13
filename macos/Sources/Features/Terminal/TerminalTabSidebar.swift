@@ -1191,6 +1191,9 @@ private struct TerminalTabSidebarBackgroundSessions: View {
         case "running": .working
         case "blocked": .blocked
         case "failed": .error
+        case "queued": .queued
+        case "done": .done
+        case "stopped": .stopped
         default: .idle
         }
     }
@@ -1261,11 +1264,12 @@ struct TerminalTabSidebarPalette {
         self.foreground = foreground
     }
 
-    /// The theme's red, yellow and green for status dots; the system colors without a theme.
+    /// The theme's red, yellow, green and graphite for status dots; the system colors without a theme.
     func statusColor(_ kind: TerminalTabAgentIndicator.Kind) -> Color {
         let (index, fallback): (Int, NSColor) = switch kind {
         case .error: (1, .systemRed)
         case .blocked: (3, .systemYellow)
+        case .stopped: (8, .systemGray)
         default: (2, .systemGreen)
         }
         return Color(nsColor: ansi.count >= 16 ? ansi[index] : fallback)

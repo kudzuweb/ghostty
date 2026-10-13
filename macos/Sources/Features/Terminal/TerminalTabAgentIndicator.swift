@@ -11,6 +11,10 @@ struct TerminalTabAgentIndicator: Equatable {
         case working
         case done
         case idle
+        /// Background sessions only: waiting to start, drawn as a dashed ring.
+        case queued
+        /// Background sessions only: stopped by a person, drawn as a gray dot.
+        case stopped
 
         static func < (lhs: Kind, rhs: Kind) -> Bool { lhs.rawValue < rhs.rawValue }
     }
@@ -64,6 +68,8 @@ struct TerminalTabAgentIndicator: Equatable {
         case .working: "Agent working"
         case .done: "Agent finished"
         case .idle: "Agent idle"
+        case .queued: "Agent queued"
+        case .stopped: "Agent stopped"
         }
     }
 }
@@ -91,6 +97,10 @@ struct TerminalTabAgentDot: View {
             switch kind {
             case .idle:
                 Circle().strokeBorder(Color.secondary, lineWidth: 1)
+            case .queued:
+                Circle().strokeBorder(Color.secondary, style: StrokeStyle(lineWidth: 1, dash: [2, 1.5]))
+            case .stopped:
+                filled(palette.statusColor(.stopped))
             case .working:
                 filled(palette.foreground ?? Color.primary)
                     .opacity(reduceMotion || !isDim ? 1 : 0.35)
