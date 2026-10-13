@@ -31,12 +31,13 @@ struct TerminalTabGroupStoreTests {
         }
     }
 
-    @Test func automaticPicksNeverReturnPurpleOrGraphite() {
+    @Test func automaticPicksNeverReturnCursorOrBackgroundColors() {
         var used: Set<TerminalTabColor> = []
         // Walk through every automatic color, then past the end so the cycle is covered too.
         for count in 0..<30 {
             let next = TerminalTabGroupStore.nextAutomaticColor(avoiding: used, groupCount: count)
             #expect(next != .purple)
+            #expect(next != .pink)
             #expect(next != .graphite)
             #expect(next != .none)
             used.insert(next)

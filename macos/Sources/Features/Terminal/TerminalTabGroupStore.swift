@@ -8,11 +8,11 @@ enum TerminalTabGroupStore {
     private static let colorsKey = "TerminalTabGroupColors"
     private static let collapsedKey = "TerminalTabGroupsCollapsed"
 
-    /// The colors a new group is given, in order, skipping any already in use. Purple is left
-    /// out because it is the cursor color of Mauria's theme, and graphite because it sits
-    /// close to the background. The menus still offer both.
+    /// The colors a new group is given, in order, skipping any already in use. Purple and pink
+    /// are left out because they match the pink cursor of Mauria's theme, and graphite because
+    /// it sits close to the background. The menus still offer all three.
     private static let newGroupColors: [TerminalTabColor] = [
-        .blue, .green, .orange, .teal, .pink, .red, .yellow,
+        .blue, .green, .orange, .teal, .red, .yellow,
         .brightBlue, .brightGreen, .brightTeal, .brightRed, .brightYellow,
     ]
 
