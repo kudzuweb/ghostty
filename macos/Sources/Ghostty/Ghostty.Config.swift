@@ -494,6 +494,19 @@ extension Ghostty {
             )
         }
 
+        /// The terminal's text color, or nil when the config can't be read.
+        var foregroundColor: Color? {
+            guard let config = self.config else { return nil }
+            var color: ghostty_config_color_s = .init()
+            let key = "foreground"
+            guard ghostty_config_get(config, &color, key, UInt(key.lengthOfBytes(using: .utf8))) else { return nil }
+            return .init(
+                red: Double(color.r) / 255,
+                green: Double(color.g) / 255,
+                blue: Double(color.b) / 255
+            )
+        }
+
         /// The first 16 colors of the terminal palette (the ANSI colors), as set by the
         /// theme and any `palette` lines. Empty when the config can't be read.
         var ansiPalette: [Color] {

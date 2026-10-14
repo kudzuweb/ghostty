@@ -343,6 +343,10 @@ pub const Action = union(Key) {
     /// otherwise the terminal-set title.
     copy_title_to_clipboard,
 
+    /// A program reported its status with OSC 7501. The payload is passed
+    /// through unparsed for the apprt to interpret.
+    program_status: ProgramStatus,
+
     /// Sync with: ghostty_action_tag_e
     pub const Key = enum(c_int) {
         quit,
@@ -410,6 +414,7 @@ pub const Action = union(Key) {
         search_selected,
         readonly,
         copy_title_to_clipboard,
+        program_status,
 
         test "ghostty.h Action.Key" {
             try lib.checkGhosttyHEnum(Key, "GHOSTTY_ACTION_");
@@ -736,6 +741,30 @@ pub const Pwd = struct {
         writer: *std.Io.Writer,
     ) !void {
         try writer.print("{s}{{ {s} }}", .{ @typeName(@This()), value.pwd });
+    }
+};
+
+pub const ProgramStatus = struct {
+    payload: [:0]const u8,
+
+    // Sync with: ghostty_action_program_status_s
+    pub const C = extern struct {
+        payload: [*:0]const u8,
+    };
+
+    pub fn cval(self: ProgramStatus) C {
+        return .{
+            .payload = self.payload.ptr,
+        };
+    }
+
+    pub fn format(
+        value: @This(),
+        comptime _: []const u8,
+        _: std.fmt.FormatOptions,
+        writer: *std.Io.Writer,
+    ) !void {
+        try writer.print("{s}{{ {s} }}", .{ @typeName(@This()), value.payload });
     }
 };
 

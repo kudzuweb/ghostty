@@ -8,9 +8,12 @@ enum TerminalTabGroupStore {
     private static let colorsKey = "TerminalTabGroupColors"
     private static let collapsedKey = "TerminalTabGroupsCollapsed"
 
-    /// The colors a new group is given, in order, skipping any already in use.
+    /// The colors a new group is given, in order, skipping any already in use. Purple and pink
+    /// are left out because they match the pink cursor of Mauria's theme, and graphite because
+    /// it sits close to the background. The menus still offer all three.
     private static let newGroupColors: [TerminalTabColor] = [
-        .blue, .green, .purple, .orange, .teal, .pink, .red, .yellow,
+        .blue, .green, .orange, .teal, .red, .yellow,
+        .brightBlue, .brightGreen, .brightTeal, .brightRed, .brightYellow,
     ]
 
     static func color(for name: String) -> TerminalTabColor {
@@ -26,14 +29,22 @@ enum TerminalTabGroupStore {
         NotificationCenter.default.post(name: .terminalTabsDidChange, object: nil)
     }
 
-    /// Gives a group a color the first time it is used, choosing one that none of the
-    /// groups in `existing` already has.
-    static func assignColorIfNeeded(to name: String, avoiding existing: [String]) {
+    /// Gives a group a color the first time it is used: `preferred` when there is one that
+    /// isn't `.none`, otherwise one that none of the groups in `existing` already has.
+    static func assignColorIfNeeded(to name: String, avoiding existing: [String], preferred: TerminalTabColor? = nil) {
         let colors = UserDefaults.standard.dictionary(forKey: colorsKey) as? [String: Int] ?? [:]
         guard colors[name] == nil else { return }
+        if let preferred, preferred != .none {
+            setColor(preferred, for: name)
+            return
+        }
         let used = Set(existing.map(color(for:)))
-        let next = newGroupColors.first { !used.contains($0) } ?? newGroupColors[existing.count % newGroupColors.count]
-        setColor(next, for: name)
+        setColor(nextAutomaticColor(avoiding: used, groupCount: existing.count), for: name)
+    }
+
+    /// The first automatic color not in `used`, cycling once every one is taken.
+    static func nextAutomaticColor(avoiding used: Set<TerminalTabColor>, groupCount: Int) -> TerminalTabColor {
+        newGroupColors.first { !used.contains($0) } ?? newGroupColors[groupCount % newGroupColors.count]
     }
 
     /// Carries a group's color and collapsed state over to its new name.
@@ -96,7 +107,7 @@ extension TerminalWindow {
                     existing.append(group)
                 }
             }
-            TerminalTabGroupStore.assignColorIfNeeded(to: name, avoiding: existing)
+            TerminalTabGroupStore.assignColorIfNeeded(to: name, avoiding: existing, preferred: tabColor)
         }
 
         // A tab joining a group goes after the group's last tab. A tab leaving one goes after

@@ -29,6 +29,9 @@ final class TerminalTabSidebarModel: ObservableObject {
 
         /// Whether keep alive watches the tab, and whether it gave up on it.
         let keepAlive: KeepAliveTabState
+
+        /// What the agents in the tab's terminals are doing, or nil when none runs one.
+        let agentStatus: TerminalTabAgentIndicator?
     }
 
     /// A named tab group, drawn as one container holding its tabs.
@@ -137,6 +140,11 @@ final class TerminalTabSidebarModel: ObservableObject {
         let config = (window?.windowController as? BaseTerminalController)?.ghostty.config
         let newTabs = tabWindows.enumerated().map { offset, tabWindow in
             let index = offset + 1
+            let surfaces = ((tabWindow.windowController as? BaseTerminalController).map { Array($0.surfaceTree) }) ?? []
+            // Our window is only on screen while it is the selected tab, but every tab's
+            // window has a model, so ask the tab group which one is really selected.
+            let isShown = (tabWindow.tabGroup?.selectedWindow ?? tabWindow) === tabWindow
+            if isShown { markFinishedAgentsSeen(in: surfaces) }
             let shortcut = index <= 9 ? config?.keyboardShortcut(for: "goto_tab:\(index)") : nil
             return Tab(
                 id: ObjectIdentifier(tabWindow),
@@ -148,7 +156,11 @@ final class TerminalTabSidebarModel: ObservableObject {
                 // Our window is only on screen while it is the selected tab.
                 isSelected: tabWindow === window,
                 group: (tabWindow as? TerminalWindow)?.tabGroupName,
-                keepAlive: (tabWindow as? TerminalWindow)?.keepAliveState ?? .off
+                keepAlive: (tabWindow as? TerminalWindow)?.keepAliveState ?? .off,
+                agentStatus: TerminalTabAgentIndicator.aggregate(
+                    surfaces.map { ($0.agentStatus, KeepAlive.shared.apiErrorSurfaces.contains($0.id)) },
+                    isSelected: isShown
+                )
             )
         }
 
@@ -156,6 +168,16 @@ final class TerminalTabSidebarModel: ObservableObject {
         guard newTabs != tabs || newSections != sections else { return }
         tabs = newTabs
         sections = newSections
+    }
+
+    /// A tab that has been looked at no longer counts as finished: its `done` agents go
+    /// back to `idle`, so the dot turns green again only for the next finished turn.
+    private func markFinishedAgentsSeen(in surfaces: [Ghostty.SurfaceView]) {
+        for surface in surfaces {
+            if let status = surface.agentStatus, status.state == .done {
+                surface.agentStatus = status.with(state: .idle)
+            }
+        }
     }
 
     /// Lists each group once, where its first tab is. Moving a tab into a group places it
@@ -531,7 +553,7 @@ struct TerminalTabSidebarLayout<Content: View>: View {
                     .frame(width: isCollapsed ? TerminalTabSidebar.collapsedWidth : width)
                     .background(ghostty.config.backgroundColor.opacity(ghostty.config.backgroundOpacity))
                     .environment(\.colorScheme, NSColor(ghostty.config.backgroundColor).isLightColor ? .light : .dark)
-                    .environment(\.terminalTabSidebarPalette, TerminalTabSidebarPalette(ansi: ghostty.config.ansiPalette))
+                    .environment(\.terminalTabSidebarPalette, TerminalTabSidebarPalette(ansi: ghostty.config.ansiPalette, background: ghostty.config.backgroundColor, foreground: ghostty.config.foregroundColor))
 
                 divider
             }
@@ -635,6 +657,10 @@ struct TerminalTabSidebar: View {
                 ScrollView {
                     LazyVStack(spacing: 0) {
                         sectionList(isCompact: false)
+                        // Background sessions list: built but disabled by Mauria's choice (2026-10-13); uncomment to enable. See FORK.md.
+                        // if !keepAlive.backgroundSessions.isEmpty {
+                        //     TerminalTabSidebarBackgroundSessions(sessions: keepAlive.backgroundSessions)
+                        // }
                     }
                     .padding(.bottom, 6)
                 }
@@ -814,9 +840,9 @@ private struct TerminalTabSidebarRow: View {
     let tab: TerminalTabSidebarModel.Tab
     let isCompact: Bool
 
-    /// Whether the row sits on a group's tinted block, where the selected tab needs a
-    /// stronger fill to stand out.
-    var isInGroup = false
+    /// The color of the group whose tinted block the row sits on, or nil for a tab that is
+    /// in no group. A grouped tab shows its group's color, not its own.
+    var groupColor: TerminalTabColor?
 
     @Environment(\.terminalTabSidebarPalette) private var palette
     @State private var isHovering = false
@@ -828,14 +854,19 @@ private struct TerminalTabSidebarRow: View {
             .font(.system(size: 13))
             .foregroundStyle(Color.primary.opacity(tab.isSelected ? 1 : 0.75))
             .frame(maxWidth: .infinity)
-            .background(Rectangle().fill(rowFill))
+            .background {
+                ZStack {
+                    Rectangle().fill(rowFill)
+                    Rectangle().fill(Color.primary.opacity(isHovering ? 0.06 : 0))
+                }
+            }
             .contentShape(Rectangle())
             .onTapGesture { model.select(tab) }
             .onHover { isHovering = $0 }
-            .help([model.displayTitle(tab), attentionMessage].compactMap { $0 }.joined(separator: "\n"))
+            .help([model.displayTitle(tab), tab.agentStatus?.description, attentionMessage].compactMap { $0 }.joined(separator: "\n"))
             .overlay(TerminalTabSidebarMenuArea(dropTarget: { model.dropTarget(for: tab) }, menu: { model.contextMenu(for: tab) }))
             .accessibilityElement(children: .combine)
-            .accessibilityLabel(model.displayTitle(tab))
+            .accessibilityLabel([model.displayTitle(tab), tab.agentStatus?.description].compactMap { $0 }.joined(separator: ", "))
             .accessibilityAddTraits(tab.isSelected ? [.isButton, .isSelected] : .isButton)
             .accessibilityAction { model.select(tab) }
     }
@@ -867,10 +898,29 @@ private struct TerminalTabSidebarRow: View {
         }
     }
 
-    /// Rows are flat: the selected tab gets a solid highlight, and a hovered one a lighter one.
+    /// Rows are flat. A tab outside any group is tinted with its own color; a tab in a group
+    /// sits on the group's block, so only the selected one gets a stronger fill. Hover is
+    /// drawn separately, on top of this.
     private var rowFill: Color {
-        if tab.isSelected { return Color.primary.opacity(isInGroup ? 0.16 : 0.12) }
-        return Color.primary.opacity(isHovering ? 0.06 : 0)
+        if let groupColor {
+            guard tab.isSelected else { return .clear }
+            guard !palette.isNeutral(groupColor), let accent = palette.color(for: groupColor) else {
+                return Color.primary.opacity(0.16)
+            }
+            return Color(nsColor: accent).opacity(0.24)
+        }
+
+        guard let color = palette.color(for: tab.color) else {
+            return tab.isSelected ? Color.primary.opacity(0.12) : .clear
+        }
+        let isYellow = tab.color == .yellow || tab.color == .brightYellow
+        let opacity = switch (tab.isSelected, isYellow) {
+        case (false, false): 0.14
+        case (true, false): 0.30
+        case (false, true): 0.10
+        case (true, true): 0.22
+        }
+        return Color(nsColor: color).opacity(opacity)
     }
 
     @ViewBuilder
@@ -888,11 +938,10 @@ private struct TerminalTabSidebarRow: View {
             .font(.system(size: 11))
             .frame(width: 30, height: 30)
             .overlay(alignment: .topTrailing) {
-                if let color = palette.color(for: tab.color) {
-                    Circle()
-                        .fill(Color(nsColor: color))
-                        .frame(width: 6, height: 6)
+                if let status = tab.agentStatus {
+                    TerminalTabAgentDot(kind: status.kind, size: 6)
                         .padding(3)
+                        .help(status.description)
                 }
             }
             .overlay(alignment: .bottomTrailing) {
@@ -929,17 +978,14 @@ private struct TerminalTabSidebarRow: View {
                     TerminalTabSidebarButton(systemName: "xmark", label: "Close Tab", kind: .close) {
                         model.close(tab)
                     }
-                } else if let color = palette.color(for: tab.color) {
-                    Circle()
-                        .fill(Color(nsColor: color))
-                        .frame(width: 8, height: 8)
+                } else if let status = tab.agentStatus {
+                    TerminalTabAgentDot(kind: status.kind)
+                        .help(status.description)
                 }
             }
             .frame(width: 22, height: 22)
 
-            Text(tab.title)
-                .lineLimit(1)
-                .truncationMode(.tail)
+            TerminalTabSidebarScrollingTitle(text: tab.title, isHovering: isHovering)
             if model.tabs.filter({ $0.title == tab.title }).count > 1, let id = tab.surfaceID {
                 Text(String(id.uuidString.prefix(6)).lowercased())
                     .font(.system(size: 10, design: .monospaced))
@@ -963,6 +1009,96 @@ private struct TerminalTabSidebarRow: View {
     }
 }
 
+/// A row's title. It truncates at the tail until the pointer rests on a row whose title is
+/// wider than the room it has; then, after half a second, the title scrolls left at 30pt/s
+/// until its end shows and holds there. When the pointer leaves, it snaps back to the start
+/// and truncates again. A title that fits never moves, and Reduce Motion turns scrolling
+/// off (the row's tooltip still carries the full title). The scrolling text is clipped to
+/// the title's own frame, so it never slides under the status slot or the key equivalent.
+private struct TerminalTabSidebarScrollingTitle: View {
+    let text: String
+    let isHovering: Bool
+
+    private static let pointsPerSecond: CGFloat = 30
+    private static let startDelay: Duration = .milliseconds(500)
+
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    /// The title's width on one line with nothing truncated.
+    @State private var idealWidth: CGFloat = 0
+    /// The width the row gives the title.
+    @State private var frameWidth: CGFloat = 0
+    @State private var offset: CGFloat = 0
+    @State private var isScrolling = false
+
+    private var overflow: CGFloat { max(0, idealWidth - frameWidth) }
+    private var shouldScroll: Bool { isHovering && !reduceMotion && overflow > 1 }
+
+    var body: some View {
+        Text(text)
+            .lineLimit(1)
+            .truncationMode(.tail)
+            .opacity(isScrolling ? 0 : 1)
+            .background(
+                GeometryReader { proxy in
+                    Color.clear.preference(key: FrameWidthKey.self, value: proxy.size.width)
+                }
+            )
+            .background(
+                Text(text)
+                    .fixedSize()
+                    .hidden()
+                    .background(
+                        GeometryReader { proxy in
+                            Color.clear.preference(key: IdealWidthKey.self, value: proxy.size.width)
+                        }
+                    )
+            )
+            .onPreferenceChange(FrameWidthKey.self) { frameWidth = $0 }
+            .onPreferenceChange(IdealWidthKey.self) { idealWidth = $0 }
+            .overlay(alignment: .leading) {
+                if isScrolling {
+                    Text(text)
+                        .lineLimit(1)
+                        .fixedSize()
+                        .offset(x: -offset)
+                }
+            }
+            .clipped()
+            .task(id: ScrollState(shouldScroll: shouldScroll, overflow: overflow)) {
+                guard shouldScroll else {
+                    var transaction = Transaction(animation: nil)
+                    transaction.disablesAnimations = true
+                    withTransaction(transaction) {
+                        offset = 0
+                        isScrolling = false
+                    }
+                    return
+                }
+                try? await Task.sleep(for: Self.startDelay)
+                guard !Task.isCancelled else { return }
+                isScrolling = true
+                withAnimation(.linear(duration: Double(overflow / Self.pointsPerSecond))) {
+                    offset = overflow
+                }
+            }
+    }
+
+    private struct ScrollState: Equatable {
+        let shouldScroll: Bool
+        let overflow: CGFloat
+    }
+
+    private struct FrameWidthKey: PreferenceKey {
+        static let defaultValue: CGFloat = 0
+        static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) { value = nextValue() }
+    }
+
+    private struct IdealWidthKey: PreferenceKey {
+        static let defaultValue: CGFloat = 0
+        static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) { value = nextValue() }
+    }
+}
+
 /// A tab group: one flat tinted block holding a header with the group's name and the
 /// group's tabs, so the group reads as a single object. In the collapsed rail, a color bar
 /// stands in for the header. A collapsed group still shows its selected tab, if it has one.
@@ -983,7 +1119,7 @@ private struct TerminalTabSidebarGroup: View {
             }
 
             ForEach(visibleTabs) { tab in
-                TerminalTabSidebarRow(model: model, tab: tab, isCompact: isCompact, isInGroup: true)
+                TerminalTabSidebarRow(model: model, tab: tab, isCompact: isCompact, groupColor: group.color)
             }
         }
         .frame(maxWidth: .infinity)
@@ -1070,7 +1206,7 @@ private struct TerminalTabSidebarGroup: View {
     /// Graphite (and no color) groups are drawn neutral: a gray name on a gray fill would be
     /// as hard to read as the captions this is meant to replace.
     private var isNeutral: Bool {
-        group.color == .graphite || palette.color(for: group.color) == nil
+        palette.isNeutral(group.color)
     }
 
     private var accentColor: Color {
@@ -1089,7 +1225,66 @@ private struct TerminalTabSidebarGroup: View {
     private var fillColor: Color {
         if isNeutral { return Color.primary.opacity(0.06) }
         // Yellow turns muddy at the opacity the other colors use.
-        return accentColor.opacity(group.color == .yellow ? 0.08 : 0.12)
+        return accentColor.opacity(group.color == .yellow || group.color == .brightYellow ? 0.08 : 0.12)
+    }
+}
+
+/// The background Claude Code sessions that are running, queued, blocked or failed, as one
+/// block below the tabs. It is informational: its rows do nothing when clicked.
+private struct TerminalTabSidebarBackgroundSessions: View {
+    let sessions: [KeepAliveBackgroundSession]
+
+    var body: some View {
+        VStack(spacing: 0) {
+            Text("Background")
+                .font(.system(size: 13, weight: .semibold))
+                .foregroundStyle(Color.primary.opacity(0.9))
+                .lineLimit(1)
+                .padding(.leading, 10)
+                .padding(.trailing, 10)
+                .frame(maxWidth: .infinity, minHeight: 30, alignment: .leading)
+
+            ForEach(sessions, id: \.id) { session in
+                row(session)
+            }
+        }
+        .frame(maxWidth: .infinity)
+        .background(Rectangle().fill(Color.primary.opacity(0.06)))
+    }
+
+    private func row(_ session: KeepAliveBackgroundSession) -> some View {
+        let name = session.name.isEmpty ? String(session.id.prefix(8)) : session.name
+        let kind = Self.dotKind(for: session.state)
+        return HStack(spacing: 4) {
+            TerminalTabAgentDot(kind: kind)
+                .frame(width: 22, height: 22)
+            Text(name)
+                .lineLimit(1)
+                .truncationMode(.tail)
+            Spacer(minLength: 4)
+        }
+        .font(.system(size: 13))
+        .foregroundStyle(Color.primary.opacity(0.75))
+        .padding(.leading, 6)
+        .padding(.trailing, 10)
+        .frame(height: 28)
+        .contentShape(Rectangle())
+        .help("\(name)\nState: \(session.state)\nID: \(session.id)")
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel("Background session \(name), \(session.state)")
+    }
+
+    /// The dot a background session's state is drawn with.
+    static func dotKind(for state: String) -> TerminalTabAgentIndicator.Kind {
+        switch state {
+        case "running": .working
+        case "blocked": .blocked
+        case "failed": .error
+        case "queued": .queued
+        case "done": .done
+        case "stopped": .stopped
+        default: .idle
+        }
     }
 }
 
@@ -1142,8 +1337,31 @@ private struct TerminalTabSidebarMenuArea: NSViewRepresentable {
 struct TerminalTabSidebarPalette {
     private let ansi: [NSColor]
 
-    init(ansi: [Color] = []) {
+    /// The terminal's background color, used to outline status dots.
+    let background: Color
+
+    /// The terminal's text color, used for the working dot. Nil falls back to the system label color.
+    let foreground: Color?
+
+    init(
+        ansi: [Color] = [],
+        background: Color = Color(nsColor: .windowBackgroundColor),
+        foreground: Color? = nil
+    ) {
         self.ansi = ansi.map { NSColor($0).usingColorSpace(.sRGB) ?? NSColor($0) }
+        self.background = background
+        self.foreground = foreground
+    }
+
+    /// The theme's red, yellow, green and graphite for status dots; the system colors without a theme.
+    func statusColor(_ kind: TerminalTabAgentIndicator.Kind) -> Color {
+        let (index, fallback): (Int, NSColor) = switch kind {
+        case .error: (1, .systemRed)
+        case .blocked: (3, .systemYellow)
+        case .stopped: (8, .systemGray)
+        default: (2, .systemGreen)
+        }
+        return Color(nsColor: ansi.count >= 16 ? ansi[index] : fallback)
     }
 
     func color(for tabColor: TerminalTabColor) -> NSColor? {
@@ -1160,7 +1378,17 @@ struct TerminalTabSidebarPalette {
         // Terminal palettes have no orange, so mix the theme's red and yellow.
         case .orange: return ansi[1].blended(withFraction: 0.5, of: ansi[3]) ?? ansi[1]
         case .graphite: return ansi[8]
+        case .brightRed: return ansi[9]
+        case .brightGreen: return ansi[10]
+        case .brightYellow: return ansi[11]
+        case .brightBlue: return ansi[12]
+        case .brightTeal: return ansi[14]
         }
+    }
+
+    /// Graphite and no color are drawn neutral rather than tinted.
+    func isNeutral(_ tabColor: TerminalTabColor) -> Bool {
+        tabColor == .graphite || color(for: tabColor) == nil
     }
 }
 

@@ -602,6 +602,9 @@ extension Ghostty {
             case GHOSTTY_ACTION_PROGRESS_REPORT:
                 progressReport(app, target: target, v: action.action.progress_report)
 
+            case GHOSTTY_ACTION_PROGRAM_STATUS:
+                programStatus(app, target: target, v: action.action.program_status)
+
             case GHOSTTY_ACTION_CONFIG_CHANGE:
                 configChange(app, target: target, v: action.action.config_change)
 
@@ -660,8 +663,12 @@ extension Ghostty {
             case GHOSTTY_ACTION_SIZE_LIMIT:
                 fallthrough
             case GHOSTTY_ACTION_QUIT_TIMER:
-                fallthrough
+                Ghostty.logger.info("known but unimplemented action action=\(action.tag.rawValue)")
+                return false
             case GHOSTTY_ACTION_SHOW_CHILD_EXITED:
+                // An agent that crashes never sends `clear`, so the child's exit clears its
+                // status. Returning false keeps the core's own "Process exited" message.
+                clearAgentStatus(app, target: target)
                 Ghostty.logger.info("known but unimplemented action action=\(action.tag.rawValue)")
                 return false
             case GHOSTTY_ACTION_COPY_TITLE_TO_CLIPBOARD:
@@ -1425,6 +1432,9 @@ extension Ghostty {
                 // Keep alive tells a deliberate exit from a crash by the exit status.
                 let finishedID = surfaceView.id
                 MainActor.assumeIsolated {
+                    // The shell is back at its prompt, so any agent that ran in it has exited.
+                    // An agent that crashed never sent `clear`, so its status would otherwise stay.
+                    surfaceView.agentStatus = nil
                     KeepAlive.shared.commandFinished(in: finishedID, exitCode: v.exit_code)
                     AgentSessionRecovery.shared.commandFinished(surfaceID: finishedID, exitCode: v.exit_code)
                 }
@@ -1997,6 +2007,49 @@ extension Ghostty {
 
             default:
                 assertionFailure()
+            }
+        }
+
+        private static func programStatus(
+            _ app: ghostty_app_t,
+            target: ghostty_target_s,
+            v: ghostty_action_program_status_s) {
+            switch target.tag {
+            case GHOSTTY_TARGET_APP:
+                Ghostty.logger.warning("program status does nothing with an app target")
+                return
+
+            case GHOSTTY_TARGET_SURFACE:
+                guard let surface = target.target.surface else { return }
+                guard let surfaceView = self.surfaceView(from: surface) else { return }
+                // The payload is only valid during this callback, so copy it now.
+                guard let payload = v.payload.flatMap({ String(cString: $0, encoding: .utf8) }) else { return }
+
+                let update = Ghostty.AgentStatus.parse(payload)
+                DispatchQueue.main.async {
+                    switch update {
+                    case .set(let status):
+                        surfaceView.agentStatus = status
+                    case .clear:
+                        surfaceView.agentStatus = nil
+                    case .ignore:
+                        break
+                    }
+                }
+
+            default:
+                assertionFailure()
+            }
+        }
+
+        private static func clearAgentStatus(
+            _ app: ghostty_app_t,
+            target: ghostty_target_s) {
+            guard target.tag == GHOSTTY_TARGET_SURFACE,
+                  let surface = target.target.surface,
+                  let surfaceView = self.surfaceView(from: surface) else { return }
+            DispatchQueue.main.async {
+                surfaceView.agentStatus = nil
             }
         }
 

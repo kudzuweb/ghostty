@@ -1,0 +1,5 @@
+# Ghostty fork sleep guard: lets the app flip the system sleep flag without a password.
+# USERNAME is a placeholder for the login the rule applies to. Install with:
+#   sed "s/^USERNAME /$USER /" fork/sudoers.d/ghostty-sleep-guard > /tmp/ghostty-sleep-guard && sudo install -o root -g wheel -m 0440 /tmp/ghostty-sleep-guard /etc/sudoers.d/ghostty-sleep-guard && sudo visudo -c && rm /tmp/ghostty-sleep-guard
+# See FORK.md, Sleep guard.
+USERNAME ALL=(root) NOPASSWD: /usr/bin/pmset -a disablesleep 1, /usr/bin/pmset -a disablesleep 0

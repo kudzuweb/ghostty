@@ -184,6 +184,9 @@ struct KeepAliveBackgroundSession: Equatable {
     let id: String
     let name: String
     let state: String
+    /// The process id, present only while the session's process is alive. `claude agents`
+    /// reports `null` for dead sessions, even ones whose state still says `blocked`.
+    let pid: Int?
 }
 
 enum KeepAliveAgents {
@@ -205,7 +208,7 @@ enum KeepAliveAgents {
                 }
             case "background":
                 if let id = entry["id"] as? String, let state = entry["state"] as? String {
-                    snapshot.background.append(.init(id: id, name: entry["name"] as? String ?? "", state: state))
+                    snapshot.background.append(.init(id: id, name: entry["name"] as? String ?? "", state: state, pid: entry["pid"] as? Int))
                 }
             default:
                 continue
@@ -218,6 +221,35 @@ enum KeepAliveAgents {
     /// stopped by a person and a `done` one finished, so neither is touched.
     static func respawnTargets(_ sessions: [KeepAliveBackgroundSession]) -> [KeepAliveBackgroundSession] {
         sessions.filter { $0.state == "failed" }
+    }
+
+    /// The background sessions the sidebar lists: those whose process is alive (a `pid`) in
+    /// any state, plus `failed` ones without a pid, which keep alive respawns. Order is
+    /// blocked, failed, running, queued, done, stopped, each group by name. A state this app
+    /// doesn't know is left out.
+    static func sidebarSessions(_ sessions: [KeepAliveBackgroundSession]) -> [KeepAliveBackgroundSession] {
+        let order = ["blocked", "failed", "running", "queued", "done", "stopped"]
+        return sessions
+            .filter { order.contains($0.state) && ($0.pid != nil || $0.state == "failed") }
+            .sorted { lhs, rhs in
+                let (l, r) = (order.firstIndex(of: lhs.state) ?? 0, order.firstIndex(of: rhs.state) ?? 0)
+                if l != r { return l < r }
+                let byName = lhs.name.localizedCaseInsensitiveCompare(rhs.name)
+                return byName == .orderedSame ? lhs.id < rhs.id : byName == .orderedAscending
+            }
+    }
+
+    /// The blocked sessions that haven't been announced yet, and the ids to remember as
+    /// announced afterwards. Only a session with a `pid` counts, because a blocked entry
+    /// without one is a dead session. An id leaves the set once it is no longer blocked, so it is
+    /// announced again if it blocks again.
+    static func newlyBlocked(
+        in sessions: [KeepAliveBackgroundSession],
+        alreadyNotified: Set<String>
+    ) -> (toAnnounce: [KeepAliveBackgroundSession], notified: Set<String>) {
+        let blocked = sessions.filter { $0.state == "blocked" && $0.pid != nil }
+        let ids = Set(blocked.map(\.id))
+        return (blocked.filter { !alreadyNotified.contains($0.id) }, ids)
     }
 }
 

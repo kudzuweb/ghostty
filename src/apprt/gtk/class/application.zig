@@ -764,6 +764,10 @@ pub const Application = extern struct {
             .search_total => Action.searchTotal(target, value),
             .search_selected => Action.searchSelected(target, value),
 
+            // Fork addition for the macOS sidebar. Ignored quietly because
+            // agents send it on every state change.
+            .program_status => return false,
+
             // Unimplemented
             .secure_input,
             .close_all_windows,

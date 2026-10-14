@@ -176,6 +176,11 @@
       <enumerator name="green" code="GTCg" description="Green."/>
       <enumerator name="teal" code="GTCt" description="Teal."/>
       <enumerator name="graphite" code="GTCa" description="Graphite."/>
+      <enumerator name="bright red" code="GTBr" description="Bright red."/>
+      <enumerator name="bright green" code="GTBg" description="Bright green."/>
+      <enumerator name="bright yellow" code="GTBy" description="Bright yellow."/>
+      <enumerator name="bright blue" code="GTBb" description="Bright blue."/>
+      <enumerator name="bright teal" code="GTBt" description="Bright teal."/>
     </enumeration>
 
     <command name="perform action" code="GhstPfAc" description="Perform a Ghostty action string on a terminal.">
