@@ -16,9 +16,14 @@ for a in "$@"; do
                  d="$work/$n"; mkdir -p "$d"
                  abs=$(cd "$(dirname "$a")" && pwd)/$(basename "$a")
                  if (cd "$d" && /usr/bin/ar -x "$abs" 2>/dev/null); then
-                     chmod u+rw "$d"/* 2>/dev/null || true
-                     /usr/bin/ar -rcs "$work/$n.a" "$d"/* 2>/dev/null
-                     a="$work/$n.a"
+                     # An archive that already has a symbol table extracts it as a
+                     # __.SYMDEF file, and libtool refuses it as a member.
+                     rm -f "$d"/__.SYMDEF*
+                     if [ -n "$(ls -A "$d")" ]; then
+                         chmod u+rw "$d"/* 2>/dev/null || true
+                         /usr/bin/ar -rcs "$work/$n.a" "$d"/* 2>/dev/null
+                         a="$work/$n.a"
+                     fi
                  fi
              fi ;;
     esac
